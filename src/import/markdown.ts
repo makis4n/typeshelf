@@ -12,6 +12,7 @@ import type { Book } from '../book/types';
 import { decodeText } from './decode';
 import { collapse, decodeEntities } from './markup';
 import { assembleBook, type Draft, type DraftChapter, type FileInfo } from './shape';
+import { HEADING_NUMBER } from './text';
 
 type Block = { kind: 'heading'; level: number; text: string } | { kind: 'para'; text: string };
 
@@ -21,9 +22,10 @@ const RULE = /^(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/;
 const LIST_ITEM = /^(?:[-*+]|(\d{1,9})[.)])\s+(?:\[[ xX]\]\s+)?(.*)$/;
 const LINK_DEFINITION = /^\[[^\]]+\]:\s*\S+/;
 const FOOTNOTE_DEFINITION = /^\[\^[^\]]+\]:/;
-/** "Part One", "Book II", "Volume 3": a heading that groups chapters. "Part of the Furniture" is not one. */
-const PART_HEADING =
-  /^(?:part|book|volume)\s+(?:the\s+)?(?:\d+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last)(?![\w'’])/i;
+/** A heading that starts with the word for a group of chapters. */
+const PART_WORD = /^(?:part|book|volume)\b/i;
+/** "Part One", "Book the Thirteenth", "Volume 3": certainly a group of chapters. "Part of the Furniture" is not. */
+const NUMBERED_PART = new RegExp(`^(?:part|book|volume)\\s+(?:the\\s+)?${HEADING_NUMBER}(?![\\w'’])`, 'i');
 const TABLE_DIVIDER = /^\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?$/;
 
 /** Removes `<!-- comments -->`. An opening with no closing is left as written. */
@@ -200,21 +202,23 @@ export function draftFromMarkdown(markdown: string): Draft {
   let chapterLevel = levels.find((level) => counts.get(level)! >= 2) ?? levels[0] ?? 0;
   // "Part One", "Book II" over a repeated lower level: the parts group chapters, they are not the chapters.
   const below = levels.find((level) => level > chapterLevel && counts.get(level)! >= 2);
-  // Other headings may sit beside the parts ("Prologue", "Epilogue"), as long as every lower heading is inside a part.
+  // That holds when every heading at the level starts with Part, Book or Volume. Other headings may sit
+  // beside them ("Prologue", "Epilogue") when the parts are plainly numbered and every lower heading is inside one.
   if (below !== undefined) {
+    const tops = blocks.filter((block) => block.kind === 'heading' && block.level === chapterLevel);
     let insidePart = false;
     let parts = 0;
     let strays = 0;
     for (const block of blocks) {
       if (block.kind !== 'heading') continue;
       if (block.level === chapterLevel) {
-        insidePart = PART_HEADING.test(block.text);
+        insidePart = NUMBERED_PART.test(block.text);
         if (insidePart) parts++;
       } else if (block.level === below && !insidePart) {
         strays++;
       }
     }
-    if (parts > 0 && strays === 0) chapterLevel = below;
+    if (tops.every((block) => PART_WORD.test(block.text)) || (parts > 0 && strays === 0)) chapterLevel = below;
   }
 
   const firstHeading = blocks.find((block) => block.kind === 'heading');

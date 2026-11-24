@@ -13,11 +13,16 @@ import { collapse } from './markup';
 import { assembleBook, type Draft, type DraftChapter, type FileInfo } from './shape';
 
 const UNITS = 'one|two|three|four|five|six|seven|eight|nine';
+const ORDINAL_UNITS = 'first|second|third|fourth|fifth|sixth|seventh|eighth|ninth';
+const TENS = 'twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety';
 const NUMBER_WORDS =
-  `(?:${UNITS}|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen` +
-  `|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[ -](?:${UNITS}))?` +
-  `|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|last)`;
-const NUMBER = `(?:\\d{1,4}|[ivxlcdm]+|${NUMBER_WORDS})`;
+  `(?:(?:${TENS})(?:[ -](?:${UNITS}|${ORDINAL_UNITS}))?|${UNITS}|${ORDINAL_UNITS}` +
+  '|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen' +
+  '|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth' +
+  '|twentieth|thirtieth|fortieth|fiftieth|sixtieth|seventieth|eightieth|ninetieth|last)';
+/** A number as headings write it: digits, a roman numeral, or words up to ninety-nine ("Twenty-One", "Thirteenth"). Regex source, case to be ignored. */
+export const HEADING_NUMBER = `(?:\\d{1,4}|[ivxlcdm]+|${NUMBER_WORDS})`;
+const NUMBER = HEADING_NUMBER;
 
 /** "Chapter 1", "CHAPTER IV. The Storm", "Book the First", "Part Two: Winter". */
 const KEYWORD_HEADING = new RegExp(
@@ -70,7 +75,7 @@ function blocksOf(text: string): string[][] {
   const blocks: string[][] = [];
   let current: string[] = [];
   const close = () => {
-    // A long run of lines that were not broken by wrapping: each line is its own paragraph.
+    // A long run of lines that wrapping did not produce: each line is its own paragraph.
     if (isUnwrapped(current)) for (const line of current) blocks.push([line]);
     else if (current.length > 0) blocks.push(current);
     current = [];
@@ -86,25 +91,27 @@ function blocksOf(text: string): string[][] {
 /** More lines than a wrapped paragraph plausibly has before its line breaks are questioned. */
 const LONG_BLOCK = 40;
 
+/** Ends a sentence, in Latin and in CJK writing, with any closing quotes or brackets after it. */
+const SENTENCE_END = /[.!?…。！？‥][\s"'”’»）)」』\]]*$/u;
+
 /**
- * Wrapping breaks a line only when the next word would not fit. So in wrapped
- * text, the first word of a line never had room at the end of the line before.
- * A long block where it often did have room is a list of one-line paragraphs
- * (or verse) written without blank lines between them.
+ * True for a long block that is a list of one-line paragraphs written without
+ * blank lines between them, not one wrapped paragraph. Either sign is enough:
  *
- * The width is taken from the lines themselves, a little under the longest,
- * so one overlong line does not make every other line look short.
+ * - Its lines are of very uneven length. Wrapping fills every line but the
+ *   last to nearly the same width. (The width is taken a little under the
+ *   longest line, so that a single overlong line does not make the rest look short.)
+ * - Nearly every line ends a sentence. Wrapping breaks lines wherever the
+ *   width runs out, which is rarely at a full stop.
  */
 function isUnwrapped(block: string[]): boolean {
   if (block.length <= LONG_BLOCK) return false;
-  const lengths = block.slice(0, -1).map((line) => line.length).sort((a, b) => a - b);
-  const width = lengths[Math.floor(lengths.length * 0.8)]!;
-  let roomy = 0;
-  for (let i = 0; i + 1 < block.length; i++) {
-    const firstWord = /^\S+/.exec(block[i + 1]!)![0];
-    if (block[i]!.length + 1 + firstWord.length <= width) roomy++;
-  }
-  return roomy > (block.length - 1) * 0.15;
+  const body = block.slice(0, -1);
+  const lengths = body.map((line) => line.length).sort((a, b) => a - b);
+  const widest = lengths[Math.floor((lengths.length - 1) * 0.95)]!;
+  const full = body.filter((line) => line.length >= widest * 0.6).length;
+  if (full < body.length * 0.85) return true;
+  return body.filter((line) => SENTENCE_END.test(line)).length >= body.length * 0.9;
 }
 
 /** "Title: Emma" and "Author: Jane Austen" lines, as found at the top of Project Gutenberg files. */

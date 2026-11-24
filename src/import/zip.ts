@@ -6,8 +6,11 @@
  * hundred kilobytes can claim to be tiny and unpack to gigabytes, many times
  * over. So the work done here is bounded by what is really unpacked:
  * - the sizes the directory claims are added up against a byte budget before
- *   anything is unpacked, and
- * - unpacking a file stops the moment it yields more than it claimed.
+ *   anything is unpacked,
+ * - unpacking a file stops the moment it yields more than it claimed, as soon
+ *   as it has yielded all it claimed, or when it stops yielding anything, and
+ * - no two entries may share bytes of the file, so the compressed data read
+ *   is never more than the file itself.
  *
  * Only what EPUBs use is supported: stored and deflated entries, no zip64, no
  * zip-level passwords.
@@ -41,8 +44,15 @@ export interface Zip {
 const END_RECORD = 0x06054b50;
 const DIRECTORY_RECORD = 0x02014b50;
 const LOCAL_RECORD = 0x04034b50;
-/** Compressed bytes handed to the inflater at a time. Deflate expands at most about 1000 times, so one step yields a few megabytes at worst. */
-const STEP = 4096;
+/** Compressed bytes handed to the inflater at a time. Deflate expands at most about 1000 times, so one step yields some megabytes at worst. */
+const STEP = 16 * 1024;
+/**
+ * The most compressed input that can pass without any output in a sound
+ * stream: one block stored without compression (65,535 bytes and its header),
+ * which the inflater only hands over whole. Past this, the stream has ended or
+ * is padding, and feeding it more would only pile up unread input.
+ */
+const MAX_SILENT_INPUT = 80_000;
 
 const broken = (detail: string) => new ImportError('unreadable', `zip: ${detail}`);
 
@@ -73,19 +83,30 @@ function readDirectory(bytes: Uint8Array, view: DataView): Map<string, Entry> {
   if (count === 0xffff || at === 0xffffffff) throw broken('zip64 is not supported');
 
   const entries = new Map<string, Entry>();
+  /** Where each entry's header and data start and (at the earliest) end. */
+  const spans: [start: number, end: number][] = [];
   for (let i = 0; i < count; i++) {
     if (at + 46 > bytes.length || view.getUint32(at, true) !== DIRECTORY_RECORD) throw broken('damaged directory');
     const nameLength = view.getUint16(at + 28, true);
     const next = at + 46 + nameLength + view.getUint16(at + 30, true) + view.getUint16(at + 32, true);
     if (next > bytes.length) throw broken('damaged directory');
-    entries.set(decodeName(bytes.subarray(at + 46, at + 46 + nameLength)), {
+    const entry: Entry = {
       passwordProtected: (view.getUint16(at + 8, true) & 1) === 1,
       method: view.getUint16(at + 10, true),
       compressedSize: view.getUint32(at + 20, true),
       size: view.getUint32(at + 24, true),
       offset: view.getUint32(at + 42, true),
-    });
+    };
+    spans.push([entry.offset, entry.offset + 30 + entry.compressedSize]);
+    entries.set(decodeName(bytes.subarray(at + 46, at + 46 + nameLength)), entry);
     at = next;
+  }
+
+  // Every entry owns its own stretch of the file. A directory that points two
+  // names at the same bytes could have them unpacked over and over.
+  spans.sort((a, b) => a[0] - b[0]);
+  for (let i = 1; i < spans.length; i++) {
+    if (spans[i]![0] < spans[i - 1]![1]) throw broken('two entries share the same data');
   }
   return entries;
 }
@@ -106,15 +127,22 @@ function unpack(bytes: Uint8Array, view: DataView, name: string, entry: Entry): 
 
   const out = new Uint8Array(entry.size);
   let written = 0;
+  let silent = 0;
   const inflater = new Inflate((chunk) => {
     // More than the directory claimed: stop here, before unpacking the rest.
     if (written + chunk.length > out.length) throw broken(`"${name}" is larger than the zip says`);
     out.set(chunk, written);
     written += chunk.length;
+    if (chunk.length > 0) silent = 0;
   });
   try {
-    for (let at = start; at < end; at += STEP) inflater.push(bytes.subarray(at, Math.min(at + STEP, end)), at + STEP >= end);
-    if (start === end) inflater.push(new Uint8Array(0), true);
+    // Stops as soon as everything claimed has come out: whatever follows is not part of the file.
+    for (let at = start; at < end && written < out.length; at += STEP) {
+      const step = bytes.subarray(at, Math.min(at + STEP, end));
+      silent += step.length;
+      inflater.push(step, at + STEP >= end);
+      if (silent > MAX_SILENT_INPUT) throw broken(`"${name}" stops before the size the zip says`);
+    }
   } catch (cause) {
     if (cause instanceof ImportError) throw cause;
     throw broken(`"${name}" could not be unpacked (${String(cause)})`);

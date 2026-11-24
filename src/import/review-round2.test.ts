@@ -156,12 +156,12 @@ describe('G1 again: sizes the zip lies about', () => {
     const half = { data: new Uint8Array(MAX_UNZIPPED_BYTES / 2 + 1024).fill(0x20), method: 0 as const, claims: 0 };
     half.claims = half.data.length;
     const zip = handZip(
-      [deflated(containerXml()), deflated(packageOf(2)), half],
+      [deflated(containerXml()), deflated(packageOf(2)), half, half],
       [
         ['META-INF/container.xml', 0],
         [OPF_PATH, 1],
         ['OEBPS/c0.xhtml', 2],
-        ['OEBPS/c1.xhtml', 2],
+        ['OEBPS/c1.xhtml', 3],
       ],
     );
     expect(quickly(() => codeOf(() => parseEpub(zip, FILE)))).toBe('too-large');
@@ -294,7 +294,7 @@ describe('G8 again: one line per paragraph, with fairly even lines', () => {
     expect(chaptersFromText(lines.join('\n'))[0]!.paragraphs).toHaveLength(300);
   });
 
-  it('keeps blank verse of 25 to 45 characters as one paragraph per line', () => {
+  it('keeps 120 short lines that each end a sentence as one paragraph per line', () => {
     const lines = Array.from({ length: 120 }, (_, i) => sentence(i, 25 + ((i * 11) % 20)));
     expect(chaptersFromText(lines.join('\n'))[0]!.paragraphs).toHaveLength(120);
   });
@@ -335,10 +335,10 @@ describe('G10 again: Parts beside other top-level headings', () => {
     expect(titles('# Part One\n\n## A\n\nA.\n\n# Notes\n\n## B\n\nB.\n')).toEqual(['Part One', 'Notes']);
   });
 
-  it('still treats headings that only begin with the word as ordinary chapters', () => {
-    expect(titles('# Part of the Furniture\n\n## A\n\nA.\n\n## B\n\nB.\n\n# Book Reviews\n\nR.\n')).toEqual([
+  it('still treats a heading that only begins with the word as an ordinary chapter beside others', () => {
+    expect(titles('# Part of the Furniture\n\n## A\n\nA.\n\n## B\n\nB.\n\n# Reviews\n\nR.\n')).toEqual([
       'Part of the Furniture',
-      'Book Reviews',
+      'Reviews',
     ]);
   });
 });

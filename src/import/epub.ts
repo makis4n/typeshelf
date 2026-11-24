@@ -33,12 +33,49 @@ interface TocEntry {
   title: string;
 }
 
+/**
+ * The most text, in bytes once unzipped, that a book may hold. The longest novels are
+ * a few megabytes; a zip can claim far more in a tiny file and exhaust the browser's memory.
+ */
+export const MAX_UNZIPPED_BYTES = 64 * 1024 * 1024;
+
+/**
+ * A zip entry's name as the package file would write it. Zip tools that do not
+ * flag their names as UTF-8 have them read one byte per character
+ * ("Ã\u009cber" for "Über"); those are read again as UTF-8. Composed and
+ * decomposed accents are treated as the same name.
+ */
+function entryName(name: string): string {
+  let fixed = name;
+  if (/[\u0080-\u00ff]/.test(name) && !/[^\u0000-\u00ff]/.test(name)) {
+    try {
+      fixed = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(name, (char) => char.charCodeAt(0)));
+    } catch {
+      // Not UTF-8 after all: the name really is those characters.
+    }
+  }
+  return fixed.normalize('NFC');
+}
+
+/** Unzips the entries `wanted` picks, keyed by `entryName`. Refuses to inflate more than `MAX_UNZIPPED_BYTES`. */
 function unzip(bytes: Uint8Array, wanted: (name: string) => boolean): Map<string, Uint8Array> {
+  let total = 0;
+  let files: Record<string, Uint8Array>;
   try {
-    return new Map(Object.entries(unzipSync(bytes, { filter: (file) => wanted(file.name) })));
+    files = unzipSync(bytes, {
+      filter: (file) => {
+        if (!wanted(entryName(file.name))) return false;
+        // The size is checked before anything is inflated.
+        total += file.originalSize;
+        if (total > MAX_UNZIPPED_BYTES) throw new ImportError('too-large', 'unzipped text');
+        return true;
+      },
+    });
   } catch (cause) {
+    if (cause instanceof ImportError) throw cause;
     throw new ImportError('unreadable', `not a readable zip file (${String(cause)})`);
   }
+  return new Map(Object.entries(files).map(([name, data]) => [entryName(name), data]));
 }
 
 function decodePath(path: string): string {
@@ -54,14 +91,14 @@ export function resolveHref(from: string, href: string): { path: string; fragmen
   const hash = href.indexOf('#');
   const fragment = hash < 0 ? '' : decodePath(href.slice(hash + 1));
   const target = decodePath(hash < 0 ? href : href.slice(0, hash));
-  if (target.length === 0) return { path: from, fragment };
+  if (target.length === 0) return { path: from.normalize('NFC'), fragment };
 
   const parts = target.startsWith('/') ? [] : from.split('/').slice(0, -1);
   for (const part of target.split('/')) {
     if (part === '..') parts.pop();
     else if (part !== '.' && part !== '') parts.push(part);
   }
-  return { path: parts.join('/'), fragment };
+  return { path: parts.join('/').normalize('NFC'), fragment };
 }
 
 /**
@@ -138,7 +175,7 @@ export function parseEpub(bytes: Uint8Array, file: FileInfo): Book {
   const opfPath = decodePath(
     (rootfiles.find((rootfile) => rootfile.attrs['media-type'] === 'application/oebps-package+xml') ?? rootfiles[0])
       ?.attrs['full-path'] ?? '',
-  );
+  ).normalize('NFC');
   const encryptionBytes = meta.get(ENCRYPTION);
   const encrypted = encryptionBytes ? encryptedPaths(decodeXml(encryptionBytes)) : new Set<string>();
   if (encrypted.has(opfPath)) throw new ImportError('drm');
@@ -203,7 +240,8 @@ export function parseEpub(bytes: Uint8Array, file: FileInfo): Book {
   let pendingTitle = '';
   for (const path of spine) {
     const source = read(path);
-    if (source === undefined) continue; // listed but missing from the zip
+    // A chapter must never vanish without a word: a book with a hole in it is refused.
+    if (source === undefined) throw new ImportError('unreadable', `"${path}" is listed but not in the file`);
     const entries = toc.filter((entry) => entry.path === path);
     const anchors = new Set(entries.map((entry) => entry.fragment).filter(Boolean));
 

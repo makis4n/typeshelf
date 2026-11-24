@@ -87,6 +87,22 @@ function headerField(text: string, name: string): string | undefined {
   return new RegExp(`^[ \\t]*${name}:[ \\t]*(\\S.*)$`, 'im').exec(top)?.[1]?.trim();
 }
 
+const GUTENBERG_START = /^[ \t]*\*{3}\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK[^*]{0,400}\*{3}[ \t]*$/im;
+const GUTENBERG_END =
+  /^[ \t]*(?:\*{3}\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK|End of (?:the )?Project Gutenberg(?:['’]s)? )/im;
+
+/**
+ * Project Gutenberg files wrap the book in a notice at the top and a long
+ * licence at the bottom. Only the book between the two marker lines is kept.
+ * Text without the markers is returned as it is.
+ */
+export function stripGutenbergNotice(text: string): string {
+  const start = GUTENBERG_START.exec(text);
+  const book = start ? text.slice(start.index + start[0].length) : text;
+  const end = GUTENBERG_END.exec(book);
+  return end ? book.slice(0, end.index) : book;
+}
+
 /** Splits decoded text into chapters. Exported for tests. */
 export function chaptersFromText(text: string): DraftChapter[] {
   const blocks = blocksOf(text);
@@ -128,7 +144,7 @@ export function parseText(bytes: Uint8Array, file: FileInfo): Book {
     source: 'text',
     title: headerField(text, 'Title'),
     author: headerField(text, 'Author'),
-    chapters: chaptersFromText(text),
+    chapters: chaptersFromText(stripGutenbergNotice(text)),
   };
   return assembleBook(draft, file);
 }

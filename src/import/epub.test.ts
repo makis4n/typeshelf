@@ -205,14 +205,6 @@ describe('parseEpub documents', () => {
     expect(parseEpub(bytes, FILE).chapters).toEqual([{ title: 'Chapter 1', paragraphs: ['The story starts here.'] }]);
   });
 
-  it('skips spine documents that are missing from the zip', () => {
-    const bytes = handMade({
-      [OPF_PATH]: pkg([doc('one'), doc('gone')].join(''), '<itemref idref="gone"/><itemref idref="one"/>'),
-      'OEBPS/one.xhtml': xhtmlPage('<h1>One</h1><p>Present.</p>'),
-    });
-    expect(parseEpub(bytes, FILE).chapters.map((chapter) => chapter.title)).toEqual(['One']);
-  });
-
   it('joins several authors and ignores non-author creators', () => {
     const bytes = handMade({
       [OPF_PATH]: pkg(
@@ -348,5 +340,46 @@ describe('resolveHref', () => {
   it('decodes percent escapes and tolerates malformed ones', () => {
     expect(resolveHref('a.xhtml', 'my%20file.xhtml').path).toBe('my file.xhtml');
     expect(resolveHref('a.xhtml', 'bad%zz.xhtml').path).toBe('bad%zz.xhtml');
+  });
+});
+
+/** Clears the "names are UTF-8" flag on every entry, as command-line zip tools leave it. */
+function withoutUtf8Flag(zip: Uint8Array): Uint8Array {
+  const out = zip.slice();
+  for (let i = 0; i + 10 < out.length; i++) {
+    if (out[i] !== 0x50 || out[i + 1] !== 0x4b) continue;
+    const local = out[i + 2] === 0x03 && out[i + 3] === 0x04;
+    const central = out[i + 2] === 0x01 && out[i + 3] === 0x02;
+    if (local) out[i + 7]! &= ~0x08;
+    if (central) out[i + 9]! &= ~0x08;
+  }
+  return out;
+}
+
+describe('parseEpub file names (review G5)', () => {
+  const files = {
+    [OPF_PATH]: pkg(
+      [doc('a', 'Kapitel_%C3%9Cber.xhtml'), doc('b')].join(''),
+      '<itemref idref="a"/><itemref idref="b"/>',
+    ),
+    'OEBPS/Kapitel_Über.xhtml': xhtmlPage('<h1>Über</h1><p>Erster Absatz.</p>'),
+    'OEBPS/b.xhtml': xhtmlPage('<h1>B</h1><p>Second.</p>'),
+  };
+
+  it('finds a non-ASCII file whose zip entry is not flagged as UTF-8', () => {
+    const book = parseEpub(withoutUtf8Flag(handMade(files)), FILE);
+    expect(book.chapters.map((chapter) => chapter.title)).toEqual(['Über', 'B']);
+  });
+
+  it('still finds it when the entry is flagged', () => {
+    expect(parseEpub(handMade(files), FILE).chapters.map((chapter) => chapter.title)).toEqual(['Über', 'B']);
+  });
+
+  it('refuses a book with a listed document missing, instead of importing it with a chapter gone', () => {
+    const bytes = handMade({
+      [OPF_PATH]: pkg([doc('one'), doc('gone')].join(''), '<itemref idref="gone"/><itemref idref="one"/>'),
+      'OEBPS/one.xhtml': xhtmlPage('<h1>One</h1><p>Present.</p>'),
+    });
+    expect(failure(bytes).code).toBe('unreadable');
   });
 });

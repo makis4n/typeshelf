@@ -168,3 +168,78 @@ describe('parseText', () => {
     expect(() => parseText(new Uint8Array(), FILE)).toThrow(/^empty/);
   });
 });
+
+describe('Project Gutenberg files (review G6)', () => {
+  const gutenberg = [
+    'The Project Gutenberg eBook of The Quiet Shore',
+    '',
+    'This ebook is for the use of anyone anywhere in the United States and',
+    'most other parts of the world at no cost.',
+    '',
+    'Title: The Quiet Shore',
+    '',
+    'Author: Ada Example',
+    '',
+    'Language: English',
+    '',
+    '*** START OF THE PROJECT GUTENBERG EBOOK THE QUIET SHORE ***',
+    '',
+    'CHAPTER I.',
+    '',
+    'The boat came in',
+    'before the light.',
+    '',
+    'CHAPTER II.',
+    '',
+    'Nobody met it.',
+    '',
+    '*** END OF THE PROJECT GUTENBERG EBOOK THE QUIET SHORE ***',
+    '',
+    'Updated editions will replace the previous one.',
+    '',
+    'Section 1. General Terms of Use and Redistributing Project Gutenberg™',
+    'electronic works',
+    '',
+    'You may copy it.',
+    '',
+    'Section 2. Information about the Mission of Project Gutenberg™',
+    '',
+    'Volunteers keep it going.',
+    '',
+  ].join('\r\n');
+
+  it('keeps only the book between the START and END lines', () => {
+    const book = parseText(new TextEncoder().encode(gutenberg), FILE);
+    expect(book.title).toBe('The Quiet Shore');
+    expect(book.author).toBe('Ada Example');
+    expect(book.chapters).toEqual([
+      { title: 'CHAPTER I', paragraphs: ['The boat came in before the light.'] },
+      { title: 'CHAPTER II', paragraphs: ['Nobody met it.'] },
+    ]);
+  });
+
+  it('handles a START line that runs over two lines, and the older "End of Project Gutenberg\'s" ending', () => {
+    const older = [
+      'Title: Old One',
+      '',
+      '*** START OF THIS PROJECT GUTENBERG EBOOK OLD ONE, WITH A VERY LONG',
+      'TITLE ***',
+      '',
+      'Only this is the book.',
+      '',
+      "End of Project Gutenberg's Old One, by Nobody",
+      '',
+      'Section 3. Information about the Foundation',
+      '',
+      'Not the book.',
+    ].join('\n');
+    expect(parseText(new TextEncoder().encode(older), FILE).chapters).toEqual([
+      { title: 'Old One', paragraphs: ['Only this is the book.'] },
+    ]);
+  });
+
+  it('leaves a book that only mentions Project Gutenberg alone', () => {
+    const plain = 'I found it on Project Gutenberg.\n\n*** A row of stars ***\n\nThe end of it.';
+    expect(parseText(new TextEncoder().encode(plain), FILE).chapters[0]!.paragraphs).toHaveLength(3);
+  });
+});

@@ -556,3 +556,172 @@ test('the library and a chapter screen with a warning row look as intended', asy
   await expect(page.locator('.chapter-warning')).toHaveCount(1);
   await page.screenshot({ path: testInfo.outputPath('chapters.png'), fullPage: true });
 });
+
+/** The same text with a page number between chapters two and three, and one more chapter after it. */
+const PAGES_FOUR = PAGES + '\n\n# The End\n\nNight fell on the harbour.';
+
+/** The page's own store module, which Vite serves; the path is kept out of the type checker's sight. */
+const SHARED_STORE = '/src/store/shared.ts';
+
+/** Makes the saved account owner "user-a", as if an account had signed in on this browser. */
+async function signedInAs(page: Page, owner: string): Promise<void> {
+  await page.evaluate(async ({ id, module }) => {
+    const { userStore } = await import(/* @vite-ignore */ module);
+    await (await userStore()).setOwner(id);
+  }, { id: owner, module: SHARED_STORE });
+}
+
+/** The same code path as signing out: the store ends the account's session, and the page is told. */
+async function endSession(page: Page): Promise<void> {
+  const ended = await page.evaluate(async (module) => {
+    const { userStore } = await import(/* @vite-ignore */ module);
+    return (await userStore()).endAccountSession({});
+  }, SHARED_STORE);
+  expect(ended).toBe(true);
+}
+
+/**
+ * Changes the saved place through a connection of its own, so nothing in the page hears of it: this is what
+ * another tab or device doing it looks like. `undefined` removes the place.
+ */
+async function changePlaceBehindThePage(page: Page, place: Place | undefined): Promise<void> {
+  await page.evaluate(
+    (next) =>
+      new Promise<void>((resolve, reject) => {
+        const opening = indexedDB.open('typeshelf-user');
+        opening.onerror = () => reject(opening.error);
+        opening.onsuccess = () => {
+          const db = opening.result;
+          const store = db.transaction('progress', 'readwrite').objectStore('progress');
+          const all = store.getAll();
+          all.onsuccess = () => {
+            const [record] = all.result as { bookId: string; position: Place }[];
+            if (next === undefined) store.delete(record!.bookId);
+            else store.put({ ...record, position: next, updatedAt: Date.now() + 1000 });
+            store.transaction.oncomplete = () => {
+              db.close();
+              resolve();
+            };
+          };
+        };
+      }),
+    place,
+  );
+}
+
+test('when the account session ends on the chapter screen, the sample is typed and no place is kept', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await importMarkdown(page, 'story.md', STORY);
+  await intoSecondChapter(page, 'It came ');
+  await signedInAs(page, 'user-a');
+  await openChapters(page, 'story');
+
+  await endSession(page);
+
+  await expect(page.locator('.book h1')).toHaveText('Pride and Prejudice');
+  await expect(page.locator('main.shelf')).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem('typeshelf:reading'))).toBeNull();
+  expect(await storedPlace(page)).toBeUndefined();
+});
+
+test('when the account session ends in the library, the sample is typed and no place is kept', async ({ page }) => {
+  await page.goto('/');
+  await importMarkdown(page, 'story.md', STORY);
+  await intoSecondChapter(page, 'It came ');
+  await signedInAs(page, 'user-a');
+  await openLibrary(page);
+
+  await endSession(page);
+
+  await expect(page.locator('.book h1')).toHaveText('Pride and Prejudice');
+  await expect(page.locator('main.shelf')).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem('typeshelf:reading'))).toBeNull();
+  expect(await storedPlace(page)).toBeUndefined();
+});
+
+test('a stale chapter screen whose progress is gone saves nothing and shows the book as not started', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await importMarkdown(page, 'story.md', STORY);
+  await intoSecondChapter(page, 'It came ');
+  await openChapters(page, 'story');
+  await expect(page.getByRole('button', { name: 'Continue Chapter 2', exact: true })).toBeVisible();
+
+  await changePlaceBehindThePage(page, undefined);
+  await page.getByRole('button', { name: 'Continue Chapter 2', exact: true }).click();
+
+  await expect(page.getByRole('button', { name: 'Start Chapter 1', exact: true })).toBeVisible();
+  await expect(page.locator('.chapters-book p')).toContainText('0% typed');
+  await expect(page.locator('main.shelf')).toBeVisible();
+  // Nothing is written on a stale say-so; give a wrongly started save time to land.
+  await page.waitForTimeout(500);
+  expect(await storedPlace(page)).toBeUndefined();
+});
+
+test('a stale chapter screen leaves another place alone and shows the progress as it now is', async ({ page }) => {
+  await page.goto('/');
+  await importMarkdown(page, 'story.md', STORY);
+  await intoSecondChapter(page, 'It came ');
+  await openChapters(page, 'story');
+  await expect(page.getByRole('button', { name: 'Continue Chapter 2', exact: true })).toBeVisible();
+
+  const earlier = { chapter: 0, paragraph: 0, char: 4 };
+  await changePlaceBehindThePage(page, earlier);
+  await page.getByRole('button', { name: 'Continue Chapter 2', exact: true }).click();
+
+  await expect(page.getByRole('button', { name: 'Continue Chapter 1', exact: true })).toBeVisible();
+  await expect(chapterRow(page, 0).locator('button.go')).toBeVisible();
+  // Nothing is written on a stale say-so; give a wrongly started save time to land.
+  await page.waitForTimeout(500);
+  expect(await storedPlace(page)).toEqual(earlier);
+});
+
+test('Start opens the chapter that was shown when this screen cannot store the merge', async ({ page }) => {
+  await page.goto('/');
+  await importMarkdown(page, 'pages.md', PAGES);
+  await openChapters(page, 'pages');
+  // The page re-reads the layout from storage; with writing refused it still has the old one.
+  await page.evaluate(() => {
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key: string, value: string) {
+      if (key.startsWith('typeshelf:layout:')) throw new DOMException('full', 'QuotaExceededError');
+      return original.call(this, key, value);
+    };
+  });
+  await chapterRow(page, 1).getByRole('button', { name: 'Merge into The Start', exact: true }).click();
+  await expect(page.locator('li.shelf-row.chapter')).toHaveCount(2);
+  await expect(chapterRow(page, 1).locator('.shelf-title')).toHaveText('The Next');
+
+  await chapterRow(page, 1).locator('button', { hasText: /^Start$/ }).click();
+
+  await expect(page.locator('main.shelf')).toHaveCount(0);
+  await expect(page.locator('.book p')).toHaveText('The Next');
+  await waitForPlace(page, { chapter: 2, paragraph: 0, char: 0 });
+});
+
+test('Start opens the right chapter when another tab merged chapters after this screen was put up', async ({
+  context,
+}) => {
+  const one = await context.newPage();
+  await one.goto('/');
+  await importMarkdown(one, 'pages.md', PAGES_FOUR);
+  await openChapters(one, 'pages');
+  await expect(one.locator('li.shelf-row.chapter')).toHaveCount(4);
+
+  const two = await context.newPage();
+  await two.goto('/');
+  await openChapters(two, 'pages');
+  await chapterRow(two, 1).getByRole('button', { name: 'Merge into The Start', exact: true }).click();
+  await expect(two.locator('li.shelf-row.chapter')).toHaveCount(3);
+
+  // The first tab still numbers four chapters, and "The Next" is its third.
+  await expect(chapterRow(one, 2).locator('.shelf-title')).toHaveText('The Next');
+  await chapterRow(one, 2).locator('button', { hasText: /^Start$/ }).click();
+
+  await expect(one.locator('main.shelf')).toHaveCount(0);
+  await expect(one.locator('.book p')).toHaveText('The Next');
+  await waitForPlace(one, { chapter: 2, paragraph: 0, char: 0 });
+});

@@ -16,8 +16,13 @@ const count = (words: number) => `${words.toLocaleString('en')} ${words === 1 ? 
 export function BookScreen(props: {
   bookId: string;
   onBack: () => void;
-  /** Type this chapter (an index into the chapters as shown). */
-  onChapter: (book: Book, chapter: number) => void;
+  /**
+   * Type a chapter.
+   *
+   * @param first The book's own chapter that the chosen chapter starts with.
+   * @param saved The saved place this screen was showing when the reader chose.
+   */
+  onChapter: (book: Book, first: number, saved: Position | undefined) => void;
   /** The book was removed from this device. */
   onRemoved: (bookId: string) => void;
   /** The reader joined or kept a chapter, so the chapters are numbered differently now. */
@@ -52,6 +57,13 @@ export function BookScreen(props: {
   const nameOf = (index: number) => {
     const title = shown()[index]?.title.trim() ?? '';
     return title === '' || title === book()?.title ? `Chapter ${index + 1}` : title;
+  };
+
+  /** Hand a chosen chapter (an index into the chapters as shown here) to the page. */
+  const choose = (chapter: number) => {
+    const current = book();
+    const chosen = shown()[chapter];
+    if (current && chosen) props.onChapter(current, chosen.first, saved());
   };
 
   const change = (next: Layout) => {
@@ -116,7 +128,7 @@ export function BookScreen(props: {
                 <button
                   type="button"
                   class="go big"
-                  onClick={() => props.onChapter(current(), progress().current)}
+                  onClick={() => choose(progress().current)}
                 >
                   {progress().started ? 'Continue' : 'Start'} Chapter {progress().current + 1}
                 </button>
@@ -174,7 +186,7 @@ export function BookScreen(props: {
                               type="button"
                               classList={{ go: here() }}
                               aria-label={`${here() ? 'Continue' : 'Start'} ${nameOf(index())}`}
-                              onClick={() => props.onChapter(current(), index())}
+                              onClick={() => choose(index())}
                             >
                               {here() ? 'Continue' : 'Start'}
                             </button>
@@ -185,7 +197,7 @@ export function BookScreen(props: {
                             type="button"
                             class="completed"
                             aria-label={`Type ${nameOf(index())} again`}
-                            onClick={() => props.onChapter(current(), index())}
+                            onClick={() => choose(index())}
                           >
                             <span class="rest">Completed</span>
                             <span class="over">Type again</span>

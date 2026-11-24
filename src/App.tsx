@@ -2,7 +2,7 @@ import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { account } from './account';
 import { AccountButton } from './auth/AccountButton';
 import { loadLayout, shownChapters, toBook, toShown, type ShownChapter } from './book/layout';
-import { openingPlace, placeAfterChapter, PlaceKeeper } from './book/place';
+import { openingPlace, placeAfterChapter, PlaceKeeper, samePlace } from './book/place';
 import { bookProgress } from './book/progress';
 import { positionAtWordStart, wordAt } from './book/position';
 import type { Book, Position } from './book/types';
@@ -55,6 +55,23 @@ interface Reading {
 
 /** What fills the page under the header: the text being typed, the library, or one book's chapters. */
 type View = { name: 'typing' } | { name: 'library' } | { name: 'book'; bookId: string };
+
+/** A chapter chosen on a book's chapter screen. */
+interface ChapterChoice {
+  /**
+   * The book's own chapter that the chosen chapter starts with. Not its
+   * number on the screen: screens can number chapters differently when one
+   * has joined chapters the other has not heard of (see `book/layout.ts`).
+   */
+  first: number;
+  /**
+   * The saved place the screen was showing when the choice was made. When
+   * given and no longer the saved place (another account's by now, or moved
+   * by another tab or device), the choice was made against stale progress
+   * and is not acted on.
+   */
+  seen?: { saved: Position | undefined };
+}
 
 function lastBookId(): string | null {
   try {
@@ -285,29 +302,40 @@ export function App() {
   /**
    * Type a book.
    *
-   * @param chapter Which chapter, as an index into the chapters as shown. Left out: wherever the reader left the book.
-   *   The chapter the reader is in opens at their place. A later one moves their place to its start. An earlier
-   *   one is typed again without moving their place.
+   * @param choice Which chapter. Left out: wherever the reader left the book. The chapter the reader is in opens
+   *   at their place. A later one moves their place to its start. An earlier one is typed again without moving
+   *   their place.
    */
-  const openBook = async (book: Book, chapter?: number) => {
+  const openBook = async (book: Book, choice?: ChapterChoice) => {
     if (book.chapters.length === 0) return;
     const turn = ++opening;
     setImporting(false);
     // A place still being written must be there to be read.
     await keeper?.settled();
     const next: PlaceKeeper = new PlaceKeeper(userStore, book, () => {
-      if (keeper === next) backToSample();
+      if (keeper === next) sessionOver();
     });
     const saved = await next.read();
     if (turn !== opening) return;
+    if (choice?.seen) {
+      const seen = choice.seen.saved;
+      const same = seen === undefined || saved === undefined ? seen === saved : samePlace(seen, saved);
+      if (!same) {
+        // The chapter screen was showing progress that is no longer the reader's. Nothing is
+        // opened or saved on its say-so: it is put up afresh, with the progress as it is now.
+        setView({ name: 'book', bookId: book.id });
+        return;
+      }
+    }
     keeper = next;
     watchSessionEnd();
     setAhead(null);
     rememberBook(book.id);
-    if (chapter === undefined) showChapter(book, saved);
+    if (choice === undefined) showChapter(book, saved);
     else {
       const shown = shownChapters(book, loadLayout(book.id));
       const progress = bookProgress(shown, book.chapters.length, saved);
+      const chapter = toShown(shown, { chapter: choice.first, paragraph: 0, char: 0 }).chapter;
       const startOf = toBook(shown, { chapter, paragraph: 0, char: 0 });
       const behind = progress.started && (progress.finished || chapter < progress.current);
       if (behind) showChapter(book, startOf, true);
@@ -338,6 +366,16 @@ export function App() {
     start();
   };
 
+  /**
+   * The account that was reading here is no longer signed in on this
+   * browser. Whatever screen is up may be showing its progress, so the page
+   * goes back to the sample being typed.
+   */
+  const sessionOver = () => {
+    backToSample();
+    if (!typing()) showTyping();
+  };
+
   let watchingSessionEnd = false;
   /**
    * From the first book on, be told when an account's session in the local
@@ -347,7 +385,7 @@ export function App() {
     if (watchingSessionEnd) return;
     watchingSessionEnd = true;
     userStore().then(
-      (store) => store.onSessionEnded(backToSample),
+      (store) => store.onSessionEnded(sessionOver),
       () => {
         watchingSessionEnd = false;
       },
@@ -422,8 +460,23 @@ export function App() {
     return book !== undefined && shown !== undefined && index + 1 < shown.length;
   };
   const nextChapter = () => {
-    const { book, index } = reading();
-    if (book && hasNextChapter()) void openBook(book, index + 1);
+    const { book, index, shown } = reading();
+    const next = shown?.[index + 1];
+    if (book && next) void openBook(book, { first: next.first });
+  };
+
+  /** The chapters named in the "continue from there?" question, numbered as this device shows them. */
+  const aheadChapters = () => {
+    const question = ahead();
+    const shown = reading().shown;
+    if (!question || !shown) return undefined;
+    return { there: toShown(shown, question.there.position).chapter + 1, here: toShown(shown, question.here).chapter + 1 };
+  };
+
+  /** The book whose chapters are up, as the very object in `view`: putting up a new one shows the screen afresh. */
+  const bookView = () => {
+    const now = view();
+    return now.name === 'book' ? now : undefined;
   };
 
   /** Leave the typing view for another screen. The typing clock stops where it is. */
@@ -609,12 +662,12 @@ export function App() {
           }}
         />
       </Show>
-      <Show when={view().name === 'book' ? (view() as { bookId: string }).bookId : undefined} keyed>
-        {(bookId) => (
+      <Show when={bookView()} keyed>
+        {(shown) => (
           <BookScreen
-            bookId={bookId}
+            bookId={shown.bookId}
             onBack={() => setView({ name: 'library' })}
-            onChapter={(book, chapter) => void openBook(book, chapter)}
+            onChapter={(book, first, saved) => void openBook(book, { first, seen: { saved } })}
             onRemoved={onRemoved}
             onLayout={(changed) => {
               if (reading().book?.id === changed) stale = true;
@@ -687,13 +740,12 @@ export function App() {
         </dl>
 
         <Show when={ahead()}>
-          {(question) => (
+          {(_question) => (
             <section class="done ahead" role="alert">
               <h2>Another device is further on in this book.</h2>
-              <Show when={question().there.position.chapter !== question().here.chapter}>
+              <Show when={aheadChapters()?.there !== aheadChapters()?.here}>
                 <p>
-                  It is at chapter {question().there.position.chapter + 1}; here you are at chapter{' '}
-                  {question().here.chapter + 1}.
+                  It is at chapter {aheadChapters()?.there}; here you are at chapter {aheadChapters()?.here}.
                 </p>
               </Show>
               <button type="button" onClick={() => void answerAhead(true)}>

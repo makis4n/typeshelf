@@ -591,4 +591,97 @@ test.describe('with accounts switched on', () => {
     // The reader's choice is the newest save, so the account now has this place.
     await expect.poll(() => accountOffset(user.id), { timeout: 25_000 }).toBe('The '.length);
   });
+
+  /** Three chapters, the second a page number that the importer took for a heading. */
+  const PAGES = '# The Start\n\nThe colour of the sea was grey.\n\n# 117\n\nMind the gap.\n\n# The Next\n\nIt came back at noon.';
+
+  async function importPages(page: Page): Promise<void> {
+    await page.getByRole('button', { name: 'Import', exact: true }).click();
+    await page
+      .locator('dialog.import input[type=file]')
+      .evaluate((input: HTMLInputElement, text) => {
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([text], 'pages.md', { type: 'text/markdown' }));
+        input.files = transfer.files;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }, PAGES);
+    await expect(page.locator('.book h1')).toHaveText('pages');
+    await expect(page.locator('.ts')).toHaveClass(/ts-focused/);
+  }
+
+  async function openChapters(page: Page): Promise<void> {
+    await page.getByRole('button', { name: 'Library', exact: true }).click();
+    await page.getByRole('button', { name: 'pages: chapters' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: 'pages' })).toBeVisible();
+  }
+
+  test('signing out on a chapter screen puts the sample on the page and sends nothing for the next account', async ({
+    page,
+  }) => {
+    test.setTimeout(60_000);
+    const first = await readerInBook(page, 'chapters-out');
+    await page.getByRole('button', { name: 'Library', exact: true }).click();
+    await page.getByRole('button', { name: 'sea: chapters' }).click();
+    await expect(page.locator('button.go.big')).toHaveText('Continue Chapter 1');
+
+    await signOut(page);
+    await expect(page.locator('main.shelf')).toHaveCount(0);
+    await expect(page.locator('.book h1')).toHaveText('Pride and Prejudice');
+
+    // The next account signs in on the same browser and must not inherit the first one's place.
+    const second = await verifiedAccount('chapters-in');
+    await signIn(page, second.email, second.password);
+    await expect(page.getByRole('button', { name: 'Account', exact: true })).toBeVisible();
+    // Longer than a batch of saves takes to reach the account, so a wrong save would have shown by now.
+    await page.waitForTimeout(3000);
+    const rows = await admin(stack!).from('book_progress').select('book_id').eq('user_id', second.id);
+    expect(rows.data).toEqual([]);
+    expect(await accountOffset(first.id)).toBe('The colour of '.length);
+  });
+
+  test('the "further on" notice numbers chapters as this browser shows them', async ({ browser }) => {
+    test.setTimeout(90_000);
+    const user = await verifiedAccount('ahead-numbers');
+
+    // Browser one has the three chapters as imported and is three letters into "The Next".
+    const one = await (await browser.newContext()).newPage();
+    await one.goto(SITE);
+    await typingReady(one);
+    await signIn(one, user.email, user.password);
+    await expect(one.getByRole('button', { name: 'Account', exact: true })).toBeVisible();
+    await importPages(one);
+    await openChapters(one);
+    await one.locator('li.shelf-row.chapter[data-chapter="2"]').locator('button', { hasText: /^Start$/ }).click();
+    await expect(one.locator('.book p')).toHaveText('The Next');
+    await one.keyboard.type('It ');
+    await expect
+      .poll(
+        async () => {
+          const { data } = await admin(stack!).from('book_progress').select('chapter, char_offset').eq('user_id', user.id);
+          return data;
+        },
+        { timeout: 25_000 },
+      )
+      .toEqual([{ chapter: 2, char_offset: 3 }]);
+
+    // Browser two has merged the page number into chapter one, so "The Next" is its chapter 2, not 3.
+    const two = await (await browser.newContext()).newPage();
+    await two.goto(SITE);
+    await typingReady(two);
+    await importPages(two);
+    await openChapters(two);
+    await two
+      .locator('li.shelf-row.chapter[data-chapter="1"]')
+      .getByRole('button', { name: 'Merge into The Start', exact: true })
+      .click();
+    await expect(two.locator('li.shelf-row.chapter')).toHaveCount(2);
+    await two.locator('button.mark').click();
+    await expect(two.locator('main.shelf')).toHaveCount(0);
+    await two.keyboard.type('The ');
+    await signIn(two, user.email, user.password);
+
+    const question = two.getByRole('alert').filter({ hasText: 'Another device is further on' });
+    await expect(question).toBeVisible();
+    await expect(question).toContainText('It is at chapter 2; here you are at chapter 1.');
+  });
 });

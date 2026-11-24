@@ -617,4 +617,35 @@ describe('how far off the device clock is', () => {
     expect(await store.settingsChangedAt()).toBe(1_400_200);
     expect(await store.clockOffset()).toBe(0);
   });
+
+  it('stamps saves by a timer the clock cannot disturb, for as long as the tab stays open', async () => {
+    // What the account said the time was, and a stopwatch that only ever runs forward.
+    const stopwatch = { ms: 500 };
+    const store = await UserStore.open(new IDBFactory(), { monotonic: () => stopwatch.ms });
+    const T = 10_000_000;
+    // Measured: the device clock read T and was right.
+    await store.setClockOffset(0, T);
+
+    // Ten minutes pass. Meanwhile the device clock is set back, or forward, or to 1970:
+    // whatever `Date.now()` says now, the save is stamped ten minutes after the measurement.
+    stopwatch.ms += 10 * 60_000;
+    expect(await store.accountTime()).toBe(T + 10 * 60_000);
+    expect((await store.saveProgress(BOOK, at(5))).updatedAt).toBe(T + 10 * 60_000);
+    await store.markSettingsChanged();
+    expect(await store.settingsChangedAt()).toBe(T + 10 * 60_000);
+  });
+
+  it('falls back to the device clock and the last known offset after a reload', async () => {
+    const browser = new IDBFactory();
+    const first = await UserStore.open(browser, { monotonic: () => 0 });
+    await first.setClockOffset(-3_600_000, 10_000_000);
+    first.close();
+
+    // A new page has no stopwatch reading from before.
+    const reloaded = await UserStore.open(browser, { monotonic: () => 0 });
+    const before = Date.now();
+    const stamp = await reloaded.accountTime();
+    expect(stamp).toBeGreaterThanOrEqual(before - 3_600_000);
+    expect(stamp).toBeLessThanOrEqual(Date.now() - 3_600_000);
+  });
 });

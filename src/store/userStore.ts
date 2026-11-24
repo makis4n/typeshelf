@@ -105,13 +105,27 @@ function must(ok: boolean, what: string): void {
   if (!ok) throw new RangeError(`typeshelf: ${what}`);
 }
 
+export interface StoreOptions {
+  /**
+   * A stopwatch that only runs forward, in milliseconds, whatever happens
+   * to the device's clock. The browser's `performance.now()` unless a test
+   * supplies its own.
+   */
+  monotonic?: () => number;
+}
+
 export class UserStore {
   private readonly listeners = new Set<() => void>();
+  /** What the account's time was at one reading of the stopwatch. Lives only as long as the page. */
+  private anchor: { accountTime: number; at: number } | undefined;
 
-  private constructor(private readonly db: IDBDatabase) {}
+  private constructor(
+    private readonly db: IDBDatabase,
+    private readonly monotonic: (() => number) | undefined,
+  ) {}
 
   /** Open (and on first use create) the database. Tests pass their own factory. */
-  static async open(factory: IDBFactory = indexedDB): Promise<UserStore> {
+  static async open(factory: IDBFactory = indexedDB, options: StoreOptions = {}): Promise<UserStore> {
     const opening = factory.open(USER_DB_NAME, VERSION);
     opening.onupgradeneeded = () => {
       const db = opening.result;
@@ -129,7 +143,8 @@ export class UserStore {
     const db = await request(opening);
     // Another tab upgrading the database must not be blocked by this one.
     db.onversionchange = () => db.close();
-    return new UserStore(db);
+    const stopwatch = options.monotonic ?? (typeof performance === 'undefined' ? undefined : () => performance.now());
+    return new UserStore(db, stopwatch);
   }
 
   close(): void {
@@ -215,19 +230,42 @@ export class UserStore {
   // whenever it talks to the account. The offset is kept here so it also
   // holds while offline. It describes the device, not an account, and
   // outlives sign-outs.
+  //
+  // The offset alone is only right until the clock is changed again. So for
+  // as long as the page stays open, the time is not read from the clock at
+  // all: it is the account's time at the last measurement plus what a
+  // stopwatch says has passed since, and a stopwatch does not jump when the
+  // clock is set. After a reload there is no stopwatch reading to go by, and
+  // the clock plus the last known offset is the best there is.
 
   /** Milliseconds to add to this device's clock to get the account's time. 0 until measured. */
   async clockOffset(): Promise<number> {
     return ((await this.meta('clockOffset')) as number | undefined) ?? 0;
   }
 
-  /** The account's time for a reading of this device's clock. */
-  async accountTime(deviceNow: number = Date.now()): Promise<number> {
-    return deviceNow + (await this.clockOffset());
+  /**
+   * The account's time now. Given a reading of this device's clock, that
+   * reading corrected by the offset; given nothing, the best estimate there
+   * is (see above).
+   */
+  async accountTime(deviceNow?: number): Promise<number> {
+    if (deviceNow !== undefined) return deviceNow + (await this.clockOffset());
+    return this.sinceAnchor() ?? Date.now() + (await this.clockOffset());
+  }
+
+  /** The account's time by the stopwatch, if a measurement was made since the page opened. */
+  private sinceAnchor(): number | undefined {
+    if (!this.anchor || !this.monotonic) return undefined;
+    return Math.round(this.anchor.accountTime + (this.monotonic() - this.anchor.at));
   }
 
   private async offsetIn(tx: IDBTransaction): Promise<number> {
     return ((await request(tx.objectStore(META).get('clockOffset'))) as number | undefined) ?? 0;
+  }
+
+  /** The account's time now, for stamping a save inside a transaction that includes the meta store. */
+  private async stampIn(tx: IDBTransaction): Promise<number> {
+    return this.sinceAnchor() ?? Date.now() + (await this.offsetIn(tx));
   }
 
   /**
@@ -243,9 +281,12 @@ export class UserStore {
    * clock itself was changed at some point, and nothing says whether that
    * was before or after a waiting save was stamped. A save stamped with a
    * measured offset was right when it was made, so it is left as it is.
+   *
+   * @param deviceNow what this device's clock read when the measurement was made
    */
-  async setClockOffset(offset: number): Promise<void> {
+  async setClockOffset(offset: number, deviceNow: number = Date.now()): Promise<void> {
     if (!Number.isFinite(offset)) return;
+    if (this.monotonic) this.anchor = { accountTime: deviceNow + offset, at: this.monotonic() };
     const tx = this.db.transaction([META, OUTBOX, PROGRESS], 'readwrite');
     const meta = tx.objectStore(META);
     const measuredBefore = (await request(meta.get('clockOffset'))) !== undefined;
@@ -292,7 +333,7 @@ export class UserStore {
 
     const tx = this.db.transaction([PROGRESS, OUTBOX, META], 'readwrite');
     const deviceId = await this.deviceIn(tx);
-    const stamp = now ?? Date.now() + (await this.offsetIn(tx));
+    const stamp = now ?? (await this.stampIn(tx));
     const store = tx.objectStore(PROGRESS);
     const before = (await request(store.get(book.id))) as ProgressRecord | undefined;
     const record: ProgressRecord = {
@@ -376,7 +417,7 @@ export class UserStore {
   async answerAhead(bookId: string, accept: boolean, now?: number): Promise<ProgressRecord | undefined> {
     const tx = this.db.transaction([PROGRESS, OUTBOX, META], 'readwrite');
     const deviceId = await this.deviceIn(tx);
-    const stamp = now ?? Date.now() + (await this.offsetIn(tx));
+    const stamp = now ?? (await this.stampIn(tx));
     const store = tx.objectStore(PROGRESS);
     const before = (await request(store.get(bookId))) as ProgressRecord | undefined;
     if (!before?.ahead) {
@@ -521,7 +562,7 @@ export class UserStore {
     const tx = this.db.transaction([OUTBOX, META], 'readwrite');
     const mine = await this.ownedBy(tx, as);
     if (mine) {
-      tx.objectStore(META).put(now ?? Date.now() + (await this.offsetIn(tx)), 'settingsAt');
+      tx.objectStore(META).put(now ?? (await this.stampIn(tx)), 'settingsAt');
       await this.queue(tx, 'settings', '');
     }
     await finished(tx);

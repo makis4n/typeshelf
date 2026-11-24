@@ -9,15 +9,17 @@
  * the account, and the browser and the account would disagree from then on.
  */
 
-import { loadSettings, parseSettings, saveSettings, type Settings } from '../settings';
+import { parseSettings, saveSettings, storedSettings, type Settings } from '../settings';
 import type { SettingsPort } from './sync';
 
 /**
- * @param show put the account's settings into effect on this page (they are already stored)
+ * @param show    put the account's settings into effect on this page (they are already stored)
+ * @param current this page's own copy, used only when the browser has nothing stored: a first
+ *                visit, or storage that refuses to keep anything, where the page's copy is all there is
  */
-export function storedSettingsPort(show: (next: Settings) => void): SettingsPort {
+export function storedSettingsPort(show: (next: Settings) => void, current: () => Settings): SettingsPort {
   return {
-    read: () => loadSettings(),
+    read: () => storedSettings() ?? current(),
     apply: (data) => {
       const next = parseSettings(data);
       // Stored whole, so storage matches the account even where this tab's copy already did.

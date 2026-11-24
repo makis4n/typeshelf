@@ -149,6 +149,19 @@ export function parseSettings(saved: unknown): Settings {
   return settings;
 }
 
+/**
+ * The saved settings, or null when there are none to read: a first visit,
+ * or a browser (a private window, say) that refuses to keep anything.
+ */
+export function storedSettings(): Settings | null {
+  try {
+    const raw = localStorage.getItem(KEY);
+    return raw === null ? null : parseSettings(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
 /** Read saved settings, falling back to the default for anything missing or invalid. */
 export function loadSettings(): Settings {
   try {

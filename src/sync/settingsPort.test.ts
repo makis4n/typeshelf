@@ -27,7 +27,7 @@ function openTab(store: UserStore, account: FakeRemote, clock: { time: number })
     store,
     remote: account,
     userId: 'user-x',
-    settings: storedSettingsPort((next) => (tab.shown = next)),
+    settings: storedSettingsPort((next) => (tab.shown = next), () => tab.shown),
     now: () => clock.time,
     timers: { set: () => 0, clear: () => {} },
   });
@@ -116,5 +116,31 @@ describe('settings with two tabs open on one account', () => {
     expect(loadSettings().caretStyle).toBe('box');
     expect(account.count('pushSettings')).toBe(0);
     expect(await store.pendingCount()).toBe(0);
+  });
+});
+
+describe('a browser whose storage refuses to keep anything', () => {
+  it('sends the settings the reader has on the page, not the defaults', async () => {
+    // A private window: reading finds nothing, writing fails.
+    vi.stubGlobal('localStorage', {
+      getItem: () => null,
+      setItem: () => {
+        throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      },
+      removeItem: () => {},
+    });
+    const clock = { time: 10_000_000 };
+    const store = await UserStore.open(new IDBFactory());
+    const account = new FakeRemote();
+    account.settings = { data: { caretStyle: 'box', smoothCaret: 'fast' }, updatedAt: 5_000_000, deviceId: 'phone' };
+    const { tab, sync, pick } = openTab(store, account, clock);
+    await sync.start();
+    // The account's settings are on the page, though they could not be stored.
+    expect(tab.shown).toMatchObject({ caretStyle: 'box', smoothCaret: 'fast' });
+
+    clock.time += 1000;
+    await pick('stopOnError', 'word');
+    await sync.flushNow();
+    expect(account.settings?.data).toMatchObject({ caretStyle: 'box', smoothCaret: 'fast', stopOnError: 'word' });
   });
 });

@@ -18,7 +18,7 @@ import {
   type SignUpOutcome,
 } from './auth/auth';
 import { accountConfig, type AccountConfig } from './auth/config';
-import { loadSettings, onSettingsSaved, type Settings } from './settings';
+import { onSettingsSaved, type Settings } from './settings';
 import { UserStore } from './store/userStore';
 import { storedSettingsPort } from './sync/settingsPort';
 import { supabaseRemote } from './sync/supabaseRemote';
@@ -37,6 +37,8 @@ export interface AccountView {
 
 /** How the account reaches the page's settings. */
 export interface AccountHooks {
+  /** The settings as this page has them. Only used when the browser has none stored. */
+  readSettings(): Settings;
   /** Put the account's settings into effect on the page. They are already saved in the browser. */
   applySettings(next: Settings): void;
 }
@@ -144,7 +146,10 @@ export class Account {
     onSettingsSaved(() => void this.syncing?.settingsChanged());
 
     // Read from and written to the browser's stored copy, which all tabs share (see `storedSettingsPort`).
-    const settings = storedSettingsPort((next) => hooks.applySettings(next));
+    const settings = storedSettingsPort(
+      (next) => hooks.applySettings(next),
+      () => hooks.readSettings(),
+    );
 
     auth.subscribe((state) => {
       const userId = 'user' in state ? state.user.id : undefined;
@@ -165,7 +170,7 @@ export class Account {
           // Nobody is signed in, however that came about (a sign-out, an expired session, a
           // session that ended while the page was closed). What the account had not sent is
           // put aside for it, and the browser starts again as a clean guest's.
-          this.inOrder(() => store.endAccountSession(loadSettings()));
+          this.inOrder(() => store.endAccountSession(settings.read()));
         }
       }
       this.update({ auth: state, sync: this.syncing?.current() ?? null });

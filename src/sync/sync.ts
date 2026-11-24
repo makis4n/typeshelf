@@ -92,6 +92,8 @@ export class Sync {
   private readonly settings: SettingsPort;
   private readonly intervalMs: number;
   private readonly now: () => number;
+  /** Whether a clock was handed in (tests); otherwise the store's own best estimate of the time is used. */
+  private readonly ownClock: boolean;
   private readonly timers: Timers;
 
   private state: SyncState = 'synced';
@@ -117,6 +119,7 @@ export class Sync {
     this.settings = options.settings;
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.now = options.now ?? Date.now;
+    this.ownClock = options.now !== undefined;
     this.timers = options.timers ?? {
       set: (run, ms) => setTimeout(run, ms),
       clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
@@ -248,7 +251,7 @@ export class Sync {
 
   /** Now, in the account's time: this device's clock, corrected by what was last measured. */
   private accountNow(): Promise<number> {
-    return this.store.accountTime(this.now());
+    return this.ownClock ? this.store.accountTime(this.now()) : this.store.accountTime();
   }
 
   /**
@@ -263,7 +266,7 @@ export class Sync {
       const answered = this.now();
       if (answered - asked > MAX_CLOCK_ROUND_TRIP_MS) return;
       // The account read its clock somewhere between the question and the answer.
-      await this.store.setClockOffset(Math.round(account - (asked + answered) / 2));
+      await this.store.setClockOffset(Math.round(account - (asked + answered) / 2), answered);
     } catch {
       // Nothing learned this time.
     }

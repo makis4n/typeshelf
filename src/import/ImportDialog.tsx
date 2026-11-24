@@ -1,6 +1,7 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import type { Book } from '../book/types';
-import { openBookStore, type BookStore, type BookSummary } from '../store/books';
+import type { BookSummary } from '../store/books';
+import { bookStore as store } from '../store/shared';
 import {
   ACCEPTED_FILES,
   ImportError,
@@ -11,9 +12,6 @@ import {
 } from './index';
 import { parseInBackground } from './background';
 import './import.css';
-
-let sharedStore: BookStore | undefined;
-const store = () => (sharedStore ??= openBookStore());
 
 const carriesFiles = (event: DragEvent) => event.dataTransfer?.types.includes('Files') ?? false;
 

@@ -149,11 +149,16 @@ export function parseSettings(saved: unknown): Settings {
   return settings;
 }
 
+/** Whether the browser refused the last attempt to save the settings. */
+let saveRefused = false;
+
 /**
  * The saved settings, or null when there are none to read: a first visit,
  * or a browser (a private window, say) that refuses to keep anything.
  */
 export function storedSettings(): Settings | null {
+  // An older copy may still be readable when new ones cannot be written. It is not the reader's settings any more.
+  if (saveRefused) return null;
   try {
     const raw = localStorage.getItem(KEY);
     return raw === null ? null : parseSettings(JSON.parse(raw));
@@ -200,7 +205,9 @@ export function saveSetting<K extends keyof Settings>(name: K, value: Settings[K
 export function saveSettings(settings: Settings): void {
   try {
     localStorage.setItem(KEY, JSON.stringify(settings));
+    saveRefused = false;
   } catch {
+    saveRefused = true;
     // Private windows can refuse storage; the choice then lasts for this visit only.
   }
   for (const listener of savedListeners) listener(settings);

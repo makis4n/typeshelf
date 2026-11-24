@@ -232,11 +232,21 @@ export class UserStore {
   // outlives sign-outs.
   //
   // The offset alone is only right until the clock is changed again. So for
-  // as long as the page stays open, the time is not read from the clock at
-  // all: it is the account's time at the last measurement plus what a
-  // stopwatch says has passed since, and a stopwatch does not jump when the
-  // clock is set. After a reload there is no stopwatch reading to go by, and
-  // the clock plus the last known offset is the best there is.
+  // as long as the page stays open there is a second opinion: the account's
+  // time at the last measurement plus what a stopwatch says has passed
+  // since. A stopwatch does not jump when the clock is set. It can only fall
+  // behind, because in many browsers it stops while the computer sleeps.
+  // The time used is therefore the later of the two:
+  //
+  // - clock set back: the stopwatch is ahead of the clock, and right;
+  // - computer slept: the clock is ahead of the stopwatch, and right;
+  // - clock set forward: the clock is ahead, and wrong. From inside the page
+  //   this looks exactly like sleep, so the clock is believed. The stamp is
+  //   late, and the account pulls a stamp that is too far ahead back to its
+  //   own time when the save is sent.
+  //
+  // After a reload there is no stopwatch reading to go by, and the clock
+  // plus the last known offset is all there is.
 
   /** Milliseconds to add to this device's clock to get the account's time. 0 until measured. */
   async clockOffset(): Promise<number> {
@@ -249,8 +259,9 @@ export class UserStore {
    * is (see above).
    */
   async accountTime(deviceNow?: number): Promise<number> {
-    if (deviceNow !== undefined) return deviceNow + (await this.clockOffset());
-    return this.sinceAnchor() ?? Date.now() + (await this.clockOffset());
+    const offset = await this.clockOffset();
+    if (deviceNow !== undefined) return deviceNow + offset;
+    return Math.max(Date.now() + offset, this.sinceAnchor() ?? -Infinity);
   }
 
   /** The account's time by the stopwatch, if a measurement was made since the page opened. */
@@ -265,7 +276,7 @@ export class UserStore {
 
   /** The account's time now, for stamping a save inside a transaction that includes the meta store. */
   private async stampIn(tx: IDBTransaction): Promise<number> {
-    return this.sinceAnchor() ?? Date.now() + (await this.offsetIn(tx));
+    return Math.max(Date.now() + (await this.offsetIn(tx)), this.sinceAnchor() ?? -Infinity);
   }
 
   /**
@@ -286,7 +297,9 @@ export class UserStore {
    */
   async setClockOffset(offset: number, deviceNow: number = Date.now()): Promise<void> {
     if (!Number.isFinite(offset)) return;
-    if (this.monotonic) this.anchor = { accountTime: deviceNow + offset, at: this.monotonic() };
+    // Read now, used only once the measurement is stored: a save already under way must be
+    // stamped the old way and then corrected with the others, not stamped the new way and corrected too.
+    const anchor = this.monotonic ? { accountTime: deviceNow + offset, at: this.monotonic() } : undefined;
     const tx = this.db.transaction([META, OUTBOX, PROGRESS], 'readwrite');
     const meta = tx.objectStore(META);
     const measuredBefore = (await request(meta.get('clockOffset'))) !== undefined;
@@ -305,6 +318,7 @@ export class UserStore {
       }
     }
     await finished(tx);
+    this.anchor = anchor;
   }
 
   private async meta(key: string): Promise<unknown> {

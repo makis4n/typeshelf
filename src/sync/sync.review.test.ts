@@ -5,7 +5,7 @@
  */
 
 import { IDBFactory } from 'fake-indexeddb';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Position } from '../book/types';
 import type { NewSession } from '../store/userStore';
 import { UserStore } from '../store/userStore';
@@ -15,6 +15,7 @@ import { Sync } from './sync';
 const at = (chapter: number, paragraph = 0, char = 0): Position => ({ chapter, paragraph, char });
 const book = (id: string) => ({ id, fingerprint: 'a'.repeat(64) });
 const BOOK = book('book-1');
+const HOUR = 3_600_000;
 
 const session = (id: string, overrides: Partial<NewSession> = {}): NewSession => ({
   id,
@@ -375,7 +376,6 @@ describe('another device is further on, and this device has a newer save waiting
 });
 
 describe('a device whose clock runs fast', () => {
-  const HOUR = 3_600_000;
 
   it('does not ignore newer saves from other devices (F9)', async () => {
     const real = { time: 10_000_000 };
@@ -618,21 +618,58 @@ describe('how far off the device clock is', () => {
     expect(await store.clockOffset()).toBe(0);
   });
 
-  it('stamps saves by a timer the clock cannot disturb, for as long as the tab stays open', async () => {
-    // What the account said the time was, and a stopwatch that only ever runs forward.
-    const stopwatch = { ms: 500 };
-    const store = await UserStore.open(new IDBFactory(), { monotonic: () => stopwatch.ms });
+  describe('between two measurements, with the tab left open', () => {
     const T = 10_000_000;
-    // Measured: the device clock read T and was right.
-    await store.setClockOffset(0, T);
+    const TEN_MINUTES = 10 * 60_000;
 
-    // Ten minutes pass. Meanwhile the device clock is set back, or forward, or to 1970:
-    // whatever `Date.now()` says now, the save is stamped ten minutes after the measurement.
-    stopwatch.ms += 10 * 60_000;
-    expect(await store.accountTime()).toBe(T + 10 * 60_000);
-    expect((await store.saveProgress(BOOK, at(5))).updatedAt).toBe(T + 10 * 60_000);
-    await store.markSettingsChanged();
-    expect(await store.settingsChangedAt()).toBe(T + 10 * 60_000);
+    /** A browser whose clock read T, correctly, at the last measurement. The test moves the clock and the stopwatch. */
+    async function measuredAtT() {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(T);
+      const stopwatch = { ms: 500 };
+      const store = await UserStore.open(new IDBFactory(), { monotonic: () => stopwatch.ms });
+      await store.setClockOffset(0, T);
+      return { store, stopwatch };
+    }
+    afterEach(() => vi.useRealTimers());
+
+    it('a clock that is set back does not put the next save in the past', async () => {
+      const { store, stopwatch } = await measuredAtT();
+      stopwatch.ms += TEN_MINUTES;
+      vi.setSystemTime(T + TEN_MINUTES - HOUR);
+      expect(await store.accountTime()).toBe(T + TEN_MINUTES);
+      expect((await store.saveProgress(BOOK, at(5))).updatedAt).toBe(T + TEN_MINUTES);
+      await store.markSettingsChanged();
+      expect(await store.settingsChangedAt()).toBe(T + TEN_MINUTES);
+    });
+
+    it('a computer that slept does not put the next save in the past either', async () => {
+      // Many browsers stop the stopwatch while the computer sleeps; the clock keeps going.
+      const { store, stopwatch } = await measuredAtT();
+      stopwatch.ms += 60_000;
+      vi.setSystemTime(T + 8 * HOUR + 60_000);
+      expect(await store.accountTime()).toBe(T + 8 * HOUR + 60_000);
+      expect((await store.saveProgress(BOOK, at(5))).updatedAt).toBe(T + 8 * HOUR + 60_000);
+    });
+
+    it('a clock that is set forward gives a late stamp, which the account pulls back when it is sent', async () => {
+      // Sleep and a clock set forward look the same from inside the page, so the clock is believed.
+      const { store, stopwatch } = await measuredAtT();
+      stopwatch.ms += TEN_MINUTES;
+      vi.setSystemTime(T + TEN_MINUTES + HOUR);
+      expect(await store.accountTime()).toBe(T + TEN_MINUTES + HOUR);
+    });
+
+    it('a save caught mid-air by the very first measurement is corrected once, not twice', async () => {
+      // A browser an hour fast that has never been measured.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(T + HOUR);
+      const store = await UserStore.open(new IDBFactory(), { monotonic: () => 0 });
+      const saving = store.saveProgress(BOOK, at(3));
+      const measuring = store.setClockOffset(-HOUR, T + HOUR);
+      await Promise.all([saving, measuring]);
+      expect((await store.progress(BOOK.id))?.updatedAt).toBe(T);
+    });
   });
 
   it('falls back to the device clock and the last known offset after a reload', async () => {

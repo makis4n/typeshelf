@@ -143,4 +143,28 @@ describe('a browser whose storage refuses to keep anything', () => {
     await sync.flushNow();
     expect(account.settings?.data).toMatchObject({ caretStyle: 'box', smoothCaret: 'fast', stopOnError: 'word' });
   });
+
+  it('does the same when an old copy can still be read but nothing new can be written', async () => {
+    // Storage is full: the copy from an earlier visit is still there, and stays as it was.
+    const old = JSON.stringify({ caretStyle: 'line' });
+    vi.stubGlobal('localStorage', {
+      getItem: () => old,
+      setItem: () => {
+        throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      },
+      removeItem: () => {},
+    });
+    const clock = { time: 10_000_000 };
+    const store = await UserStore.open(new IDBFactory());
+    const account = new FakeRemote();
+    account.settings = { data: { caretStyle: 'box' }, updatedAt: 5_000_000, deviceId: 'phone' };
+    const { tab, sync, pick } = openTab(store, account, clock);
+    await sync.start();
+    expect(tab.shown.caretStyle).toBe('box');
+
+    clock.time += 1000;
+    await pick('stopOnError', 'word');
+    await sync.flushNow();
+    expect(account.settings?.data).toMatchObject({ caretStyle: 'box', stopOnError: 'word' });
+  });
 });

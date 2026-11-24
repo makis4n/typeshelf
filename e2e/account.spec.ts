@@ -85,6 +85,27 @@ async function accountOffset(userId: string): Promise<number | undefined> {
   return (data as { char_offset: number } | null)?.char_offset;
 }
 
+/** Sign out through the account modal, and wait until the page is a guest's again. */
+async function signOut(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Account', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Your account' }).getByRole('button', { name: 'Sign out' }).click();
+  await expect(page.getByRole('dialog')).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+}
+
+/** A signed-in reader who has typed three words of an imported book, with the place already at the account. */
+async function readerInBook(page: Page, label: string) {
+  const user = await verifiedAccount(label);
+  await page.goto(SITE);
+  await typingReady(page);
+  await signIn(page, user.email, user.password);
+  await expect(page.getByRole('button', { name: 'Account', exact: true })).toBeVisible();
+  await importBook(page);
+  await page.keyboard.type('The colour of ');
+  await expect.poll(() => accountOffset(user.id), { timeout: 25_000 }).toBe('The colour of '.length);
+  return user;
+}
+
 /** Browser one of a two-browser test: signed in, three words into the book, and the place sent to the account. */
 async function typeThreeWordsElsewhere(browser: Browser, user: { id: string; email: string; password: string }) {
   const one = await (await browser.newContext()).newPage();
@@ -308,6 +329,42 @@ test.describe('with accounts switched on', () => {
       await expect(mine.locator('[data-sync]')).toHaveAttribute('data-sync', 'synced', { timeout: 5000 });
     }).toPass({ timeout: 60_000 });
     expect(await meta('deviceId')).toBe(device);
+  });
+
+  test('signing out puts the sample back and forgets the book that was open', async ({ page }) => {
+    await readerInBook(page, 'signout');
+    expect(await page.evaluate(() => localStorage.getItem('typeshelf:reading'))).not.toBeNull();
+
+    await signOut(page);
+
+    await expect(page.locator('.book h1')).toHaveText('Pride and Prejudice');
+    expect(await page.evaluate(() => localStorage.getItem('typeshelf:reading'))).toBeNull();
+
+    // A word typed now belongs to the next guest: the sample is what opens after a reload.
+    await page.keyboard.type('It ');
+    await expect(page.locator('.c.ok')).toHaveCount('It'.length);
+    await page.waitForTimeout(1000);
+    await page.reload();
+    await typingReady(page);
+    await expect(page.locator('.book h1')).toHaveText('Pride and Prejudice');
+    expect(await page.evaluate(() => localStorage.getItem('typeshelf:reading'))).toBeNull();
+  });
+
+  test('an account signing in after another signed out does not get the earlier reader\u2019s place', async ({ page }) => {
+    await readerInBook(page, 'first');
+    await signOut(page);
+    await expect(page.locator('.book h1')).toHaveText('Pride and Prejudice');
+    await page.keyboard.type('It ');
+
+    const next = await verifiedAccount('second');
+    await signIn(page, next.email, next.password);
+    await expect(page.getByRole('button', { name: 'Account', exact: true })).toBeVisible();
+    // Long enough for a batch to have gone up, had there been anything to send.
+    await page.waitForTimeout(4000);
+
+    const { data, error } = await admin(stack!).from('book_progress').select('book_id').eq('user_id', next.id);
+    expect(error).toBeNull();
+    expect(data).toEqual([]);
   });
 
   test('a wrong password is refused with a plain sentence', async ({ page }) => {

@@ -252,10 +252,13 @@ export function App() {
     if (book.chapters.length === 0) return;
     const turn = ++opening;
     setImporting(false);
-    const next = new PlaceKeeper(userStore, book);
+    const next: PlaceKeeper = new PlaceKeeper(userStore, book, () => {
+      if (keeper === next) backToSample();
+    });
     const saved = await next.read();
     if (turn !== opening) return;
     keeper = next;
+    watchSessionEnd();
     setAhead(null);
     rememberBook(book.id);
     showChapter(book, saved);
@@ -264,20 +267,54 @@ export function App() {
     void checkAhead();
   };
 
+  /**
+   * Put the sample back and forget which book was open. For when the book
+   * on the page was being read by an account that is no longer signed in
+   * here: the next person starts as a fresh guest, with nothing of that
+   * reader's on the page or in what they go on to save.
+   */
+  const backToSample = () => {
+    opening += 1; // a book still on its way in must not land on top
+    keeper = undefined;
+    setAhead(null);
+    rememberBook(null);
+    if (!reading().book && engine) return;
+    setReading({ ...sample, index: 0 });
+    start();
+  };
+
+  let watchingSessionEnd = false;
+  /**
+   * From the first book on, be told when an account's session in the local
+   * store ends. Not before: the store is only opened once a book needs it.
+   */
+  const watchSessionEnd = () => {
+    if (watchingSessionEnd) return;
+    watchingSessionEnd = true;
+    userStore().then(
+      (store) => store.onSessionEnded(backToSample),
+      () => {
+        watchingSessionEnd = false;
+      },
+    );
+  };
+
   /** Open the book that was open last time. The sample when there is none, or it is no longer on this device. */
   const reopen = async (id: string) => {
     const turn = opening;
     let book: Book | undefined;
+    let readable = true;
     try {
       book = await bookStore().get(id);
     } catch {
-      // Storage cannot be read; the sample it is.
+      // Storage cannot be read right now. The book may well still be there, so it is not forgotten.
+      readable = false;
     }
     // The reader opened something else while this one was loading.
     if (turn !== opening) return;
     if (book && book.chapters.length > 0) await openBook(book);
     else {
-      rememberBook(null);
+      if (readable) rememberBook(null);
       if (!engine) start();
     }
   };

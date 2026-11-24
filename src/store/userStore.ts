@@ -116,6 +116,9 @@ export interface StoreOptions {
 
 export class UserStore {
   private readonly listeners = new Set<() => void>();
+  private readonly endListeners = new Set<() => void>();
+  /** True once the connection is closed, by `close` or by the browser. Nothing can be read or written after. */
+  private dead = false;
   /** What the account's time was at one reading of the stopwatch. Lives only as long as the page. */
   private anchor: { accountTime: number; at: number } | undefined;
 
@@ -141,14 +144,35 @@ export class UserStore {
       add(PARKED, { keyPath: 'id', autoIncrement: true });
     };
     const db = await request(opening);
-    // Another tab upgrading the database must not be blocked by this one.
-    db.onversionchange = () => db.close();
     const stopwatch = options.monotonic ?? (typeof performance === 'undefined' ? undefined : () => performance.now());
-    return new UserStore(db, stopwatch);
+    const store = new UserStore(db, stopwatch);
+    // Another tab upgrading the database must not be blocked by this one.
+    db.onversionchange = () => store.close();
+    // The browser can also drop a connection by itself (storage cleared, or its database process restarted).
+    db.onclose = () => {
+      store.dead = true;
+    };
+    return store;
   }
 
   close(): void {
+    this.dead = true;
     this.db.close();
+  }
+
+  /** Whether the connection is gone. A closed store is of no further use; open a new one. */
+  get closed(): boolean {
+    return this.dead;
+  }
+
+  /**
+   * Be told when an account's time in this store has ended and the store
+   * has been emptied (`endAccountSession`), through this object. Whatever
+   * the page still shows of that account's is now stale. Returns the way to stop.
+   */
+  onSessionEnded(listener: () => void): () => void {
+    this.endListeners.add(listener);
+    return () => this.endListeners.delete(listener);
   }
 
   /** Be told after every local change that needs sending. Returns the way to stop. */
@@ -731,6 +755,7 @@ export class UserStore {
     if (anything) tx.objectStore(PARKED).add(parked);
     await this.empty(tx);
     await finished(tx);
+    for (const listener of this.endListeners) listener();
     return true;
   }
 

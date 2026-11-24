@@ -310,6 +310,113 @@ describe('PlaceKeeper', () => {
     });
   });
 
+  describe('when the store changes hands', () => {
+    /** A store with an owner the test can change, writing at once. */
+    function ownedStore(initial: string | null) {
+      const saved: Position[] = [];
+      let owner = initial;
+      let stored: Position | undefined;
+      const store: PlaceStore = {
+        saveProgress: async (_book, place) => {
+          saved.push(place);
+          stored = place;
+        },
+        progress: async () => (stored ? { position: stored } : undefined),
+        owner: async () => owner,
+      };
+      return { store, saved, setOwner: (next: string | null) => (owner = next), setStored: (p: Position) => (stored = p) };
+    }
+
+    it('writes nothing more and says so once when the account signs out', async () => {
+      const fake = ownedStore('A');
+      const onLost = vi.fn();
+      const keeper = new PlaceKeeper(async () => fake.store, book, onLost);
+      keeper.save(at(0, 0, 1));
+      await keeper.settled();
+
+      fake.setOwner(null);
+      keeper.save(at(0, 0, 2));
+      await keeper.settled();
+      keeper.save(at(0, 0, 3));
+      await keeper.settled();
+
+      expect(fake.saved).toEqual([at(0, 0, 1)]);
+      expect(onLost).toHaveBeenCalledTimes(1);
+    });
+
+    it('writes nothing more and says so once when another account takes the store', async () => {
+      const fake = ownedStore('A');
+      const onLost = vi.fn();
+      const keeper = new PlaceKeeper(async () => fake.store, book, onLost);
+      keeper.save(at(0, 0, 1));
+      await keeper.settled();
+
+      fake.setOwner('B');
+      keeper.save(at(0, 0, 2));
+      await keeper.settled();
+      keeper.save(at(0, 0, 3));
+      await keeper.settled();
+
+      expect(fake.saved).toEqual([at(0, 0, 1)]);
+      expect(onLost).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps saving when a guest signs in to an account', async () => {
+      const fake = ownedStore(null);
+      const onLost = vi.fn();
+      const keeper = new PlaceKeeper(async () => fake.store, book, onLost);
+      keeper.save(at(0, 0, 1));
+      await keeper.settled();
+
+      fake.setOwner('B');
+      keeper.save(at(0, 0, 2));
+      await keeper.settled();
+      keeper.save(at(0, 0, 3));
+      await keeper.settled();
+
+      expect(fake.saved).toEqual([at(0, 0, 1), at(0, 0, 2), at(0, 0, 3)]);
+      expect(onLost).not.toHaveBeenCalled();
+    });
+
+    it('does not write a place noted before the owner changed', async () => {
+      const fake = ownedStore('A');
+      const onLost = vi.fn();
+      const keeper = new PlaceKeeper(async () => fake.store, book, onLost);
+      await keeper.read();
+
+      keeper.save(at(0, 0, 5)); // noted, not yet written
+      fake.setOwner(null);
+      await keeper.settled();
+
+      expect(fake.saved).toEqual([]);
+      expect(onLost).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads nothing and sees no move after the store has changed hands', async () => {
+      const fake = ownedStore('A');
+      fake.setStored(at(1, 0, 0));
+      const keeper = new PlaceKeeper(async () => fake.store, book, vi.fn());
+      expect(await keeper.read()).toEqual(at(1, 0, 0));
+
+      fake.setOwner('B');
+      fake.setStored(at(4, 0, 0));
+      expect(await keeper.movedElsewhere()).toBeUndefined();
+      expect(await keeper.read()).toBeUndefined();
+    });
+
+    it('is never lost with a store that has no owner', async () => {
+      const onLost = vi.fn();
+      const fake = controlledStore();
+      const keeper = new PlaceKeeper(async () => fake.store, book, onLost);
+      keeper.save(at(0, 0, 1));
+      await tick();
+      fake.writes[0]!.done();
+      await keeper.settled();
+      expect(await keeper.read()).toEqual(at(0, 0, 1));
+      expect(onLost).not.toHaveBeenCalled();
+    });
+  });
+
   describe('with the real user store', () => {
     it('reads back a saved place and queues it for the account', async () => {
       const store = await UserStore.open(new IDBFactory());

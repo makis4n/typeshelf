@@ -17,18 +17,31 @@ export function bookStore(): BookStore {
 }
 
 let user: Promise<UserStore> | undefined;
+/** The store `user` resolved to, to see when its connection has gone. */
+let opened: UserStore | undefined;
 
 /**
  * Places, sessions and the queue for the account. Rejects when the browser
- * refuses storage (some private windows); the next call tries again.
+ * refuses storage (some private windows); the next call tries again. A
+ * store whose connection has been closed is replaced by a fresh one on the
+ * next call, so later saves are not made through a dead connection.
  */
 export function userStore(): Promise<UserStore> {
+  if (opened?.closed) {
+    user = undefined;
+    opened = undefined;
+  }
   if (!user) {
     const opening = UserStore.open();
     user = opening;
-    opening.catch(() => {
-      if (user === opening) user = undefined;
-    });
+    opening.then(
+      (store) => {
+        if (user === opening) opened = store;
+      },
+      () => {
+        if (user === opening) user = undefined;
+      },
+    );
   }
   return user;
 }

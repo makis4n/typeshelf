@@ -780,3 +780,67 @@ describe('onChange', () => {
     expect(two).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('onSessionEnded', () => {
+  it('fires once, after the store is emptied, when an account session ends', async () => {
+    const store = await openStore();
+    await store.setOwner('user-1');
+    await store.saveProgress(book(), at(0, 0, 1), 100);
+    const seen: (Position | undefined)[] = [];
+    const heard = vi.fn(() => void store.progress('book-1').then((p) => seen.push(p?.position)));
+    store.onSessionEnded(heard);
+
+    expect(await store.endAccountSession({})).toBe(true);
+
+    expect(heard).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(seen).toEqual([undefined]));
+  });
+
+  it('does not fire for a guest store, where there is no session to end', async () => {
+    const store = await openStore();
+    const heard = vi.fn();
+    store.onSessionEnded(heard);
+
+    expect(await store.endAccountSession({})).toBe(false);
+
+    expect(heard).not.toHaveBeenCalled();
+  });
+
+  it('does not fire after the returned function is called', async () => {
+    const store = await openStore();
+    await store.setOwner('user-1');
+    const heard = vi.fn();
+    const stop = store.onSessionEnded(heard);
+    stop();
+
+    await store.endAccountSession({});
+
+    expect(heard).not.toHaveBeenCalled();
+  });
+});
+
+describe('closed', () => {
+  it('is false while the connection is open', async () => {
+    expect((await openStore()).closed).toBe(false);
+  });
+
+  it('is true after close', async () => {
+    const store = await openStore();
+    store.close();
+    expect(store.closed).toBe(true);
+  });
+
+  it('is true after another connection opens the database at a higher version', async () => {
+    const factory = new IDBFactory();
+    const store = await UserStore.open(factory);
+    await new Promise<void>((resolve, reject) => {
+      const request = factory.open(USER_DB_NAME, 99);
+      request.onsuccess = () => {
+        request.result.close();
+        resolve();
+      };
+      request.onerror = () => reject(request.error);
+    });
+    expect(store.closed).toBe(true);
+  });
+});

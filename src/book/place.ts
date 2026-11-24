@@ -55,6 +55,8 @@ export function openingPlace(
 export interface PlaceStore {
   saveProgress(book: Pick<Book, 'id' | 'fingerprint'>, position: Position): Promise<unknown>;
   progress(bookId: string): Promise<{ position: Position } | undefined>;
+  /** The account the store's contents belong to, or null for a guest's. A store without owners leaves it out. */
+  owner?(): Promise<string | null>;
 }
 
 /**
@@ -64,6 +66,13 @@ export interface PlaceStore {
  * runs at a time; places noted while it runs replace each other, so only the
  * newest is written next. A browser that refuses storage is not an error to
  * the reader: the book is typed as before, its place just is not kept.
+ *
+ * A keeper belongs to whoever owned the store when it first looked. If the
+ * store has since passed from that account to anyone else (a sign-out, or
+ * another account signing in, in this tab or another), the place on the
+ * page is the earlier account's, so the keeper writes nothing more and says
+ * so through `onLost`. A guest's store becoming an account's is not a loss:
+ * that is the guest signing in, and their place goes with them.
  */
 export class PlaceKeeper {
   /** The newest place not yet written. */
@@ -72,6 +81,9 @@ export class PlaceKeeper {
   private known: Position | undefined;
   private writing: Promise<void> | undefined;
   private warned = false;
+  /** Who owned the store when this keeper first looked. Undefined until then. */
+  private owner: string | null | undefined;
+  private lost = false;
 
   /**
    * @param open Gives the store. Called for every read and write, so a store that could not be opened is tried again.
@@ -79,12 +91,32 @@ export class PlaceKeeper {
   constructor(
     private readonly open: () => Promise<PlaceStore>,
     readonly book: Pick<Book, 'id' | 'fingerprint'>,
+    /** Called once, when the store turns out to belong to someone else now. */
+    private readonly onLost: () => void = () => undefined,
   ) {}
+
+  /** Whether the store still belongs to whoever this keeper started with. Notes the owner on first use. */
+  private async mine(store: PlaceStore): Promise<boolean> {
+    if (this.lost) return false;
+    if (!store.owner) return true;
+    const now = await store.owner();
+    if (this.owner === undefined || this.owner === null) {
+      this.owner = now;
+      return true;
+    }
+    if (now === this.owner) return true;
+    this.lost = true;
+    this.wanted = undefined;
+    this.onLost();
+    return false;
+  }
 
   /** The saved place, or undefined when there is none or storage cannot be read. */
   async read(): Promise<Position | undefined> {
     try {
-      const record = await (await this.open()).progress(this.book.id);
+      const store = await this.open();
+      if (!(await this.mine(store))) return undefined;
+      const record = await store.progress(this.book.id);
       this.known = record?.position;
       return this.known;
     } catch (error) {
@@ -95,6 +127,7 @@ export class PlaceKeeper {
 
   /** Note a place to be saved. Returns at once. */
   save(place: Position): void {
+    if (this.lost) return;
     this.wanted = place;
     this.writing ??= this.drain();
   }
@@ -111,9 +144,11 @@ export class PlaceKeeper {
    * still on its way.
    */
   async movedElsewhere(): Promise<Position | undefined> {
-    if (this.writing) return undefined;
+    if (this.writing || this.lost) return undefined;
     try {
-      const record = await (await this.open()).progress(this.book.id);
+      const store = await this.open();
+      if (!(await this.mine(store))) return undefined;
+      const record = await store.progress(this.book.id);
       // A save noted while reading is newer than what was just read.
       if (this.writing || !record) return undefined;
       if (this.known && samePlace(record.position, this.known)) return undefined;
@@ -133,7 +168,9 @@ export class PlaceKeeper {
         const next = this.wanted;
         this.wanted = undefined;
         if (this.known && samePlace(next, this.known)) continue;
-        await (await this.open()).saveProgress(this.book, next);
+        const store = await this.open();
+        if (!(await this.mine(store))) return;
+        await store.saveProgress(this.book, next);
         this.known = next;
       }
     } catch (error) {

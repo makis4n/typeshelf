@@ -172,6 +172,31 @@ test('the sample opens when the last book is no longer stored on the device', as
   await expect(typed(page)).toHaveCount('It'.length);
 });
 
+test('a book is still remembered after a load where the browser could not open storage', async ({ page }) => {
+  await page.goto('/');
+  await importText(page, 'tale.txt', BOOK);
+  await page.keyboard.type('The colour of ');
+  await waitForPlace(page, { chapter: 0, paragraph: 0, char: 'The colour of '.length });
+  const bookId = await page.evaluate(() => localStorage.getItem('typeshelf:reading'));
+  expect(bookId).not.toBeNull();
+
+  // Storage fails on the next load only. Init scripts run again on every load, so a flag in the session says it has failed once.
+  await page.addInitScript(() => {
+    if (sessionStorage.getItem('storage-failed-once')) return;
+    sessionStorage.setItem('storage-failed-once', '1');
+    IDBFactory.prototype.open = () => {
+      throw new DOMException('blocked', 'SecurityError');
+    };
+  });
+  await page.reload();
+  await expect(page.locator('.book h1')).toHaveText('Pride and Prejudice');
+  expect(await page.evaluate(() => localStorage.getItem('typeshelf:reading'))).toBe(bookId);
+
+  // The next load can read storage, and the book is back at its word.
+  await reload(page, 'tale');
+  await expect(typed(page)).toHaveCount(letters('The colour of'));
+});
+
 test('a place saved with American spelling opens on the same word with spelling as printed', async ({ page }) => {
   await page.goto('/');
   await importText(page, 'tale.txt', BOOK);

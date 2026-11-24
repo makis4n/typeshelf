@@ -1,4 +1,6 @@
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { account } from './account';
+import { AccountButton } from './auth/AccountButton';
 import type { Book } from './book/types';
 import { TypingEngine, type Stats } from './engine/engine';
 import { convertSpelling } from './engine/spelling';
@@ -146,6 +148,8 @@ export function App() {
 
   onMount(() => {
     start();
+    // Accounts load only now, with the typing view already on the page.
+    account.start({ readSettings: settings, applySettings });
     const timer = setInterval(publish, STATS_REFRESH_MS);
     onCleanup(() => {
       clearInterval(timer);
@@ -180,6 +184,19 @@ export function App() {
     if (name === 'autoPause') surface?.setAutoPause(autoPauseMs(next.autoPause));
     // Caret settings reach the page through attributes on the surface element.
     surface?.relayout();
+  };
+
+  /** Settings arriving from the reader's account: put into effect whatever differs. */
+  const applySettings = (next: Settings) => {
+    for (const name of Object.keys(next) as (keyof Settings)[]) {
+      if (next[name] === settings()[name]) continue;
+      if (name === 'spelling' && engine && engine.stats().activeMs > 0) {
+        // Changing the words restarts the chapter. Not under the reader's fingers: it waits for the next start.
+        const held = { ...settings(), spelling: next.spelling };
+        setSettings(held);
+        saveSetting('spelling', next.spelling);
+      } else change(name, next[name]);
+    }
   };
 
   const chooseTheme = (next: Theme) => {
@@ -248,6 +265,7 @@ export function App() {
           <button type="button" onClick={() => setImporting(true)}>
             Import
           </button>
+          <AccountButton onClose={() => giveBackKeyboard()} />
           <button type="button" class="icon" aria-label="Settings" title="Settings" onClick={openSettings}>
             {/* Gear outline from the Lucide icon set (ISC licence). */}
             <svg

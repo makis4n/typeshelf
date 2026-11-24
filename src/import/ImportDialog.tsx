@@ -1,7 +1,14 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import type { Book } from '../book/types';
 import { openBookStore, type BookStore, type BookSummary } from '../store/books';
-import { ACCEPTED_FILES, ImportError, importErrorMessage, importFile } from './index';
+import {
+  ACCEPTED_FILES,
+  ImportError,
+  importErrorMessage,
+  importFile,
+  MAX_FILE_BYTES,
+  NOT_SAVED_NOTICE,
+} from './index';
 import './import.css';
 
 let sharedStore: BookStore | undefined;
@@ -30,13 +37,15 @@ export function ImportDialog(props: {
   const [books, setBooks] = createSignal<BookSummary[]>([]);
 
   let dialog!: HTMLDialogElement;
+  /** Set while a book is handed over that the modal still has something to say about. */
+  let stayOpen = false;
   let input!: HTMLInputElement;
 
   const refresh = async () => {
     try {
       setBooks(await store().list());
     } catch {
-      // Storage can be unavailable (some private windows); importing then fails with its own message.
+      // Storage can be unavailable (some private windows). Importing still works; it says the book was not saved.
       setBooks([]);
     }
   };
@@ -46,7 +55,7 @@ export function ImportDialog(props: {
       setError('');
       void refresh();
       dialog.showModal();
-    } else if (!props.open && dialog.open) {
+    } else if (!props.open && dialog.open && !stayOpen) {
       dialog.close();
     }
   });
@@ -56,13 +65,23 @@ export function ImportDialog(props: {
     setBusy(true);
     setError('');
     try {
+      // Checked before reading, so an enormous file is never loaded into memory.
+      if (file.size > MAX_FILE_BYTES) throw new ImportError('too-large', 'file');
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const { book } = await importFile(store(), { name: file.name, bytes });
+      const { book, stored } = await importFile(store(), { name: file.name, bytes });
+      // A book that could not be kept is put on the page all the same, and the modal stays to say so.
+      stayOpen = !stored;
       props.onBook(book);
+      if (stayOpen) {
+        props.onRequestOpen();
+        setError(NOT_SAVED_NOTICE);
+        stayOpen = false;
+      }
     } catch (failure) {
       if (!(failure instanceof ImportError)) console.error(failure);
       setError(importErrorMessage(failure));
     } finally {
+      stayOpen = false;
       setBusy(false);
       input.value = ''; // so picking the same file again is noticed
     }

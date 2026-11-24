@@ -17,7 +17,7 @@ function encodingFromMark(bytes: Uint8Array): string | undefined {
 
 /**
  * Decodes plain text. A byte-order mark decides; otherwise UTF-8 if the bytes
- * are valid UTF-8, and Windows-1252 if they are not.
+ * are valid UTF-8 (or nearly so), and Windows-1252 if they are not.
  */
 export function decodeText(bytes: Uint8Array): string {
   const marked = encodingFromMark(bytes);
@@ -25,6 +25,13 @@ export function decodeText(bytes: Uint8Array): string {
   try {
     return decodeAs('utf-8', bytes, true);
   } catch {
+    // Not clean UTF-8. Either it is Windows-1252, where nearly every accented
+    // letter is an invalid sequence, or it is UTF-8 with a few damaged bytes.
+    const lenient = decodeAs('utf-8', bytes);
+    const damaged = lenient.split('\ufffd').length - 1;
+    const accented = lenient.replace(/[\u0000-\u007f\ufffd]/g, '').length;
+    // Mostly sound UTF-8: keep it and drop the damaged bytes, which nobody could type.
+    if (accented > damaged) return lenient.replace(/\ufffd/g, '');
     return decodeAs('windows-1252', bytes);
   }
 }

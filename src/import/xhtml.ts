@@ -42,7 +42,14 @@ function hasLink(element: Element): boolean {
   return element.children.some((child) => typeof child !== 'string' && (child.name === 'a' || hasLink(child)));
 }
 
-function isSkipped(element: Element): boolean {
+/** Words in a link's address, class or id that say it leads to a note. */
+const NOTE_HINT = /note|\bfn|ftn/i;
+
+/**
+ * `attached` is true when the element directly follows a word (no space) or
+ * starts its paragraph, which is where a footnote marker sits.
+ */
+function isSkipped(element: Element, attached: boolean): boolean {
   const { name, attrs } = element;
   if (DROPPED.has(name)) return true;
   if ('hidden' in attrs || attrs['aria-hidden'] === 'true') return true;
@@ -57,7 +64,13 @@ function isSkipped(element: Element): boolean {
   if (PAGE_CLASS.test(attrs['class'] ?? '') && textOf(element).length <= 20) return true;
 
   // Markers without any labelling: a small raised number that is a link.
-  if (name === 'a' && (attrs['href'] ?? '').includes('#') && MARKER.test(textOf(element))) return true;
+  if (name === 'a' && (attrs['href'] ?? '').includes('#')) {
+    const text = textOf(element);
+    // A bare number after a space ("the treaty of 1815", "see chapter 3") is a reference in the sentence,
+    // unless the link itself says it goes to a note.
+    const hinted = NOTE_HINT.test(`${attrs['href']} ${attrs['class'] ?? ''} ${attrs['id'] ?? ''}`);
+    if (BRACKETED_MARKER.test(text) || (MARKER.test(text) && (attached || hinted))) return true;
+  }
   if (name === 'sup') {
     const text = textOf(element);
     if (BRACKETED_MARKER.test(text) || (hasLink(element) && MARKER.test(text))) return true;
@@ -87,7 +100,7 @@ export function extractBlocks(source: string, anchors: ReadonlySet<string> = new
       buffer += node;
       return;
     }
-    if (isSkipped(node)) return;
+    if (isSkipped(node, buffer.trim() === '' || !/\s$/.test(buffer))) return;
 
     const { name } = node;
     const heading = /^h([1-6])$/.exec(name);

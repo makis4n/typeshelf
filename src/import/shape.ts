@@ -4,6 +4,7 @@
  */
 
 import type { Book, BookSource, Chapter } from '../book/types';
+import { hasWords } from '../engine/text';
 import { ImportError } from './errors';
 import { importId } from './fingerprint';
 import { collapse } from './markup';
@@ -37,7 +38,7 @@ export function titleFromFileName(fileName: string): string {
 }
 
 /**
- * Builds the book. Paragraphs without text and chapters without paragraphs are
+ * Builds the book. Paragraphs without words and chapters without paragraphs are
  * dropped; a book left with nothing to type is an `empty` error.
  */
 export function assembleBook(draft: Draft, file: FileInfo): Book {
@@ -46,7 +47,8 @@ export function assembleBook(draft: Draft, file: FileInfo): Book {
   const kept = draft.chapters
     .map((chapter) => ({
       title: collapse(chapter.title ?? ''),
-      paragraphs: chapter.paragraphs.map(collapse).filter((paragraph) => paragraph.length > 0),
+      // Exactly the paragraphs the typing engine keeps, so paragraph numbers mean the same in both.
+      paragraphs: chapter.paragraphs.map(collapse).filter(hasWords),
     }))
     .filter((chapter) => chapter.paragraphs.length > 0);
   if (kept.length === 0) throw new ImportError('empty');

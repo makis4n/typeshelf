@@ -69,16 +69,34 @@ function blocksOf(text: string): string[][] {
 
   const blocks: string[][] = [];
   let current: string[] = [];
+  const close = () => {
+    // A long run of lines of very uneven length was never wrapped: each line is its own paragraph.
+    if (isRagged(current)) for (const line of current) blocks.push([line]);
+    else if (current.length > 0) blocks.push(current);
+    current = [];
+  };
   for (const line of lines) {
-    if (line.length > 0) {
-      current.push(line);
-    } else if (current.length > 0) {
-      blocks.push(current);
-      current = [];
-    }
+    if (line.length > 0) current.push(line);
+    else close();
   }
-  if (current.length > 0) blocks.push(current);
+  close();
   return blocks;
+}
+
+/** More lines than a wrapped paragraph plausibly has before its evenness is questioned. */
+const LONG_BLOCK = 40;
+
+/**
+ * Wrapping fills every line but the last to nearly the same width. A long
+ * block where many lines stop well short of the longest one is a list of
+ * one-line paragraphs (or verse) written without blank lines between them.
+ */
+function isRagged(block: string[]): boolean {
+  if (block.length <= LONG_BLOCK) return false;
+  const body = block.slice(0, -1);
+  const widest = Math.max(...body.map((line) => line.length));
+  const full = body.filter((line) => line.length >= widest * 0.6).length;
+  return full < body.length * 0.85;
 }
 
 /** "Title: Emma" and "Author: Jane Austen" lines, as found at the top of Project Gutenberg files. */

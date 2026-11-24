@@ -23,6 +23,8 @@ const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input'
 /** Elements whose content is not markup. */
 const RAW = new Set(['script', 'style']);
 
+const RAW_CLOSE = { script: /<\/script/gi, style: /<\/style/gi };
+
 const OPEN_TAG =
   /<([A-Za-z_][\w:.-]*)((?:\s+[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>]+))?)*)\s*(\/?)>/y;
 const ATTRIBUTE = /([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>]+)))?/g;
@@ -62,6 +64,8 @@ export function decodeEntities(text: string): string {
 export function parseMarkup(source: string): Element {
   const root: Element = { name: '#root', attrs: {}, children: [] };
   const stack: Element[] = [root];
+  // How many elements of each name are open, so a closing tag that matches nothing costs nothing.
+  const openCount = new Map<string, number>();
   const top = () => stack[stack.length - 1]!;
   const text = (raw: string) => {
     if (raw.length > 0) top().children.push(decodeEntities(raw));
@@ -98,10 +102,11 @@ export function parseMarkup(source: string): Element {
       const end = source.indexOf('>', lt);
       const name = source.slice(lt + 2, end < 0 ? source.length : end).trim().toLowerCase();
       // Close the nearest open element of that name; ignore a closing tag that matches nothing.
-      for (let depth = stack.length - 1; depth > 0; depth--) {
-        if (stack[depth]!.name === name) {
-          stack.length = depth;
-          break;
+      if ((openCount.get(name) ?? 0) > 0) {
+        while (stack.length > 1) {
+          const closed = stack.pop()!.name;
+          openCount.set(closed, openCount.get(closed)! - 1);
+          if (closed === name) break;
         }
       }
       i = end < 0 ? source.length : end + 1;
@@ -126,11 +131,14 @@ export function parseMarkup(source: string): Element {
       const selfClosed = tag[3] === '/' || VOID.has(name);
       if (selfClosed) continue;
       if (RAW.has(name)) {
-        const close = source.toLowerCase().indexOf(`</${name}`, i);
-        i = close < 0 ? source.length : skipTo('>', close);
+        const closer = name === 'script' ? RAW_CLOSE.script : RAW_CLOSE.style;
+        closer.lastIndex = i;
+        const close = closer.exec(source);
+        i = close ? skipTo('>', close.index) : source.length;
         continue;
       }
       stack.push(element);
+      openCount.set(name, (openCount.get(name) ?? 0) + 1);
     }
   }
   return root;

@@ -140,3 +140,22 @@ test('explains why a copy-protected or unsupported file cannot be imported', asy
   await expect(importDialog(page).locator('.shelf li')).toHaveCount(0);
   await expect(page.locator('.book h1')).toHaveText('Pride and Prejudice');
 });
+
+test('a book can still be typed when the browser refuses to store it', async ({ page }) => {
+  // Storage blocked, as in some private windows.
+  await page.addInitScript(() => {
+    IDBFactory.prototype.open = () => {
+      throw new DOMException('blocked', 'SecurityError');
+    };
+  });
+  await page.goto('/');
+  await openImport(page);
+  await pick(page, 'tale.txt', strToU8('The door was open.\n\nNobody was home.'), 'text/plain');
+
+  await expect(page.locator('.book h1')).toHaveText('tale');
+  await expect(importDialog(page).getByRole('alert')).toContainText('could not be saved on this device');
+  await importDialog(page).getByRole('button', { name: 'Close import' }).click();
+  await expect(page.locator('.ts')).toHaveClass(/ts-focused/);
+  await page.keyboard.type('The door ');
+  await expect(page.locator('.c.ok')).toHaveCount('Thedoor'.length);
+});

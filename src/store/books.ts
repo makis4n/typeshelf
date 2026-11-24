@@ -42,6 +42,20 @@ export interface BookStore {
   close(): void;
 }
 
+/** The summary of a book first saved at `addedAt`. */
+export function summaryOf(book: Book, addedAt: number): BookSummary {
+  return {
+    id: book.id,
+    title: book.title,
+    author: book.author,
+    language: book.language,
+    source: book.source,
+    fingerprint: book.fingerprint,
+    chapters: book.chapters.length,
+    addedAt,
+  };
+}
+
 function request<T>(req: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     req.onsuccess = () => resolve(req.result);
@@ -80,16 +94,7 @@ export function openBookStore(factory: IDBFactory = indexedDB): BookStore {
       const done = finished(transaction);
       const summaries = transaction.objectStore(SUMMARIES);
       const existing = (await request(summaries.get(book.id))) as BookSummary | undefined;
-      const summary: BookSummary = {
-        id: book.id,
-        title: book.title,
-        author: book.author,
-        language: book.language,
-        source: book.source,
-        fingerprint: book.fingerprint,
-        chapters: book.chapters.length,
-        addedAt: existing?.addedAt ?? Date.now(),
-      };
+      const summary = summaryOf(book, existing?.addedAt ?? Date.now());
       transaction.objectStore(BOOKS).put(book);
       summaries.put(summary);
       await done;

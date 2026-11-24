@@ -67,6 +67,11 @@ async function pick(page: Page, name: string, bytes: Uint8Array, type: string): 
     );
 }
 
+async function openLibrary(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Library', exact: true }).click();
+  await expect(page.locator('main.shelf')).toBeVisible();
+}
+
 async function openImport(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Import', exact: true }).click();
   await expect(importDialog(page)).toHaveAttribute('open', '');
@@ -110,18 +115,34 @@ test('imports an EPUB and a text file, and types the first chapter of each', asy
   await expect(page.locator('.c.bad, .c.extra, .c.miss, .w.flawed')).toHaveCount(0);
 
   // Both books are kept on the device, and the same file again is not stored twice.
+  const books = page.locator('li.shelf-row[data-book]:not([data-book="sample"])');
+  await openLibrary(page);
+  await expect(books).toHaveCount(2);
+  // The book typed last comes first.
+  await expect(books.locator('.shelf-title')).toHaveText(['the tide', 'The Lighthouse Keeper']);
   await openImport(page);
-  await expect(importDialog(page).locator('.shelf li')).toHaveCount(2);
   await pick(page, 'renamed.epub', makeEpub(), 'application/epub+zip');
   await expect(page.locator('.book h1')).toHaveText('The Lighthouse Keeper');
-  await openImport(page);
-  await expect(importDialog(page).locator('.shelf li')).toHaveCount(2);
+  await openLibrary(page);
+  await expect(books).toHaveCount(2);
 
-  // A stored book survives a reload and can be opened from the list.
+  // A stored book survives a reload and can be opened from its chapters.
   await page.reload();
-  await openImport(page);
-  await importDialog(page).getByRole('button', { name: 'Type the tide' }).click();
+  await openLibrary(page);
+  await expect(books).toHaveCount(2);
+  await page.getByRole('button', { name: 'the tide: chapters' }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'the tide' })).toBeVisible();
+  await page.locator('button.go.big', { hasText: 'Continue Chapter 1' }).click();
   await expect(page.locator('.book h1')).toHaveText('the tide');
+  await expect(page.locator('.ts')).toHaveClass(/ts-focused/);
+
+  // A book can be removed from the device, and the other stays.
+  await openLibrary(page);
+  await page.getByRole('button', { name: 'the tide: chapters' }).click();
+  page.once('dialog', (dialog) => void dialog.accept());
+  await page.getByRole('button', { name: 'Remove from device' }).click();
+  await expect(books).toHaveCount(1);
+  await expect(books.locator('.shelf-title')).toHaveText('The Lighthouse Keeper');
 });
 
 test('explains why a copy-protected or unsupported file cannot be imported', async ({ page }) => {
@@ -137,8 +158,11 @@ test('explains why a copy-protected or unsupported file cannot be imported', asy
   await expect(alert).toContainText('PDF');
 
   // Nothing was stored and the sample is still on the page.
-  await expect(importDialog(page).locator('.shelf li')).toHaveCount(0);
+  await importDialog(page).getByRole('button', { name: 'Close import' }).click();
   await expect(page.locator('.book h1')).toHaveText('Pride and Prejudice');
+  await openLibrary(page);
+  await expect(page.locator('li.shelf-row[data-book]')).toHaveCount(1);
+  await expect(page.locator('li.shelf-row[data-book="sample"]')).toHaveCount(1);
 });
 
 test('a book can still be typed when the browser refuses to store it', async ({ page }) => {

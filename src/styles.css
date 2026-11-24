@@ -80,10 +80,16 @@ body {
   flex-wrap: wrap;
 }
 
-.mark {
+/* The wordmark is also the way back to the text being typed. */
+button.mark {
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--ink);
   font-family: var(--text-font);
   font-weight: 600;
   font-size: 1.15rem;
@@ -275,6 +281,11 @@ button:disabled:hover {
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* Another screen (the library, a book's chapters) is up. */
+.stage[hidden] {
+  display: none;
 }
 
 /* The typing surface grows to fill the height between the title and the numbers. */

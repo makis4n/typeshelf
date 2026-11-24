@@ -1,13 +1,17 @@
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { account } from './account';
 import { AccountButton } from './auth/AccountButton';
+import { loadLayout, shownChapters, toBook, toShown, type ShownChapter } from './book/layout';
 import { openingPlace, placeAfterChapter, PlaceKeeper } from './book/place';
+import { bookProgress } from './book/progress';
 import { positionAtWordStart, wordAt } from './book/position';
 import type { Book, Position } from './book/types';
 import { TypingEngine, type Change, type Stats } from './engine/engine';
 import { convertSpelling } from './engine/spelling';
 import { buildPassage, type Passage } from './engine/text';
 import { ImportDialog } from './import/ImportDialog';
+import { BookScreen } from './library/BookScreen';
+import { Library } from './library/Library';
 import { Logo } from './Logo';
 import { sample } from './sample/pride-and-prejudice';
 import {
@@ -41,9 +45,16 @@ interface Reading {
   paragraphs: readonly string[];
   /** The book the chapter is from. The sample has none, and its place is not kept. */
   book?: Book;
-  /** Index of the chapter in the book. */
+  /** Index of the chapter, among the book's chapters as this device shows them (`shown`). */
   index: number;
+  /** The book's chapters as shown: some of its own may have been joined (see `book/layout.ts`). */
+  shown?: ShownChapter[];
+  /** True when a chapter behind the saved place is being typed again. The place then stays where it is. */
+  revisit?: boolean;
 }
+
+/** What fills the page under the header: the text being typed, the library, or one book's chapters. */
+type View = { name: 'typing' } | { name: 'library' } | { name: 'book'; bookId: string };
 
 function lastBookId(): string | null {
   try {
@@ -121,6 +132,8 @@ export function App() {
 
   const [reading, setReading] = createSignal<Reading>({ ...sample, index: 0 });
   const [importing, setImporting] = createSignal(false);
+  const [view, setView] = createSignal<View>({ name: 'typing' });
+  const typing = () => view().name === 'typing';
   /** Another device is further on in the open book, and the reader has yet to say which place to keep. */
   const [ahead, setAhead] = createSignal<AheadQuestion | null>(null);
 
@@ -153,7 +166,8 @@ export function App() {
 
   /** Build the typing view for the current engine. Used at the start and when the layout changes. */
   const mount = () => {
-    if (!engine || !passage) return;
+    // The typing view cannot be measured while another screen is up; `showTyping` builds it on the way back.
+    if (!engine || !passage || !typing()) return;
     surface?.destroy();
     const current = settings();
     surface = new TypingSurface(
@@ -220,38 +234,67 @@ export function App() {
    * until a word is completed, so a slip on Restart can be undone by reloading.
    */
   const notePlace = (change: Change) => {
-    const { book, index } = reading();
-    if (!book || !keeper || !printed || !engine) return;
-    if (change.kind === 'finished') keeper.save(placeAfterChapter(book.chapters.length, printed, index));
+    const { book, index, shown, revisit } = reading();
+    if (!book || !shown || revisit || !keeper || !printed || !engine) return;
+    // Places are saved in the book's own chapters, whatever this device has joined.
+    if (change.kind === 'finished') keeper.save(toBook(shown, placeAfterChapter(shown.length, printed, index)));
     else if (change.kind === 'advanced' || change.kind === 'retreated') {
-      keeper.save(positionAtWordStart(printed, index, engine.wordIndex));
+      keeper.save(toBook(shown, positionAtWordStart(printed, index, engine.wordIndex)));
     }
   };
 
-  /** Show the chapter a place is in, and start typing from that place. */
-  const showChapter = (book: Book, saved: Position | undefined) => {
-    const { chapter: index, place } = openingPlace(book.chapters.length, saved);
-    const chapter = book.chapters[index];
-    if (!chapter) return;
+  /**
+   * Show the chapter a place is in, and start typing from that place.
+   *
+   * @param saved A place in the book's own chapters. The start of the book when left out.
+   * @param revisit True to type the chapter without moving the saved place.
+   */
+  const showChapter = (book: Book, saved: Position | undefined, revisit = false) => {
+    const shown = shownChapters(book, loadLayout(book.id));
+    const { chapter, place } = openingPlace(book.chapters.length, saved);
+    const at = toShown(shown, place ?? { chapter, paragraph: 0, char: 0 });
+    const now = shown[at.chapter];
+    if (!now) return;
     setReading({
       title: book.title,
       author: book.author,
-      chapter: chapter.title === book.title ? '' : chapter.title,
-      paragraphs: chapter.paragraphs,
+      chapter: now.title === book.title ? '' : now.title,
+      paragraphs: now.paragraphs,
       book,
-      index,
+      index: at.chapter,
+      shown,
+      revisit,
     });
-    start({ place });
+    stale = false;
+    setView({ name: 'typing' });
+    start({ place: place ? at : undefined });
+  };
+
+  /** True when the open book's place or chapters changed while another screen was up. */
+  let stale = false;
+
+  /** As `showChapter`, unless another screen is up: then the change waits for the reader to come back. */
+  const showWhenTyping = (book: Book, saved: Position | undefined) => {
+    if (typing()) showChapter(book, saved);
+    else stale = true;
   };
 
   /** Counts book openings, so a slow one cannot land on top of a later one. */
   let opening = 0;
 
-  /** Type a book from where the reader left it. Choosing a chapter comes with the library. */
-  const openBook = async (book: Book) => {
+  /**
+   * Type a book.
+   *
+   * @param chapter Which chapter, as an index into the chapters as shown. Left out: wherever the reader left the book.
+   *   The chapter the reader is in opens at their place. A later one moves their place to its start. An earlier
+   *   one is typed again without moving their place.
+   */
+  const openBook = async (book: Book, chapter?: number) => {
     if (book.chapters.length === 0) return;
     const turn = ++opening;
     setImporting(false);
+    // A place still being written must be there to be read.
+    await keeper?.settled();
     const next: PlaceKeeper = new PlaceKeeper(userStore, book, () => {
       if (keeper === next) backToSample();
     });
@@ -261,7 +304,19 @@ export function App() {
     watchSessionEnd();
     setAhead(null);
     rememberBook(book.id);
-    showChapter(book, saved);
+    if (chapter === undefined) showChapter(book, saved);
+    else {
+      const shown = shownChapters(book, loadLayout(book.id));
+      const progress = bookProgress(shown, book.chapters.length, saved);
+      const startOf = toBook(shown, { chapter, paragraph: 0, char: 0 });
+      const behind = progress.started && (progress.finished || chapter < progress.current);
+      if (behind) showChapter(book, startOf, true);
+      else if (chapter === progress.current) showChapter(book, saved);
+      else {
+        next.save(startOf);
+        showChapter(book, startOf);
+      }
+    }
     // The account may know of a place saved elsewhere since; `afterSync` picks up what it brings.
     void account.sync()?.refresh();
     void checkAhead();
@@ -345,7 +400,7 @@ export function App() {
     const place = await sync.answerAhead(book.id, continueFromThere).catch(() => undefined);
     if (keeper !== mine) return;
     await mine.read();
-    if (continueFromThere && place && keeper === mine) showChapter(book, place);
+    if (continueFromThere && place && keeper === mine) showWhenTyping(book, place);
   };
 
   /**
@@ -358,17 +413,44 @@ export function App() {
     if (!book || !mine) return;
     const moved = await mine.movedElsewhere();
     if (keeper !== mine) return;
-    if (moved) showChapter(book, moved);
+    if (moved) showWhenTyping(book, moved);
     await checkAhead();
   };
 
+  const hasNextChapter = () => {
+    const { book, index, shown } = reading();
+    return book !== undefined && shown !== undefined && index + 1 < shown.length;
+  };
   const nextChapter = () => {
     const { book, index } = reading();
-    if (book && index + 1 < book.chapters.length) showChapter(book, { chapter: index + 1, paragraph: 0, char: 0 });
+    if (book && hasNextChapter()) void openBook(book, index + 1);
   };
-  const hasNextChapter = () => {
-    const { book, index } = reading();
-    return book !== undefined && index + 1 < book.chapters.length;
+
+  /** Leave the typing view for another screen. The typing clock stops where it is. */
+  const leaveTyping = (next: View) => {
+    if (typing()) {
+      engine?.pause(performance.now());
+      surface?.destroy();
+      surface = undefined;
+    }
+    setView(next);
+  };
+
+  /** Back to the text being typed, as it was left. */
+  const showTyping = () => {
+    if (typing()) return surface?.focus();
+    const book = reading().book;
+    if (stale && book) return void openBook(book);
+    setView({ name: 'typing' });
+    mount();
+    publish();
+    surface?.focus();
+  };
+
+  /** A book was removed from this device. If it is the one being typed, the sample takes its place. */
+  const onRemoved = (bookId: string) => {
+    if (reading().book?.id === bookId) backToSample();
+    setView({ name: 'library' });
   };
 
   onMount(() => {
@@ -480,14 +562,19 @@ export function App() {
   return (
     <div class="page">
       <header class="top">
-        <span class="mark">
+        <button type="button" class="mark" title="Back to typing" onClick={showTyping}>
           <Logo size={28} />
           typeshelf
-        </span>
+        </button>
         <nav class="controls" aria-label="Page actions">
-          <button type="button" onClick={restart}>
-            Restart
-          </button>
+          <Show when={typing()}>
+            <button type="button" onClick={restart}>
+              Restart
+            </button>
+            <button type="button" onClick={() => leaveTyping({ name: 'library' })}>
+              Library
+            </button>
+          </Show>
           <button type="button" onClick={() => setImporting(true)}>
             Import
           </button>
@@ -512,7 +599,31 @@ export function App() {
         </nav>
       </header>
 
-      <main class="stage">
+      <Show when={view().name === 'library'}>
+        <Library
+          onType={(book) => void openBook(book)}
+          onOpen={(bookId) => setView({ name: 'book', bookId })}
+          onSample={() => {
+            backToSample();
+            showTyping();
+          }}
+        />
+      </Show>
+      <Show when={view().name === 'book' ? (view() as { bookId: string }).bookId : undefined} keyed>
+        {(bookId) => (
+          <BookScreen
+            bookId={bookId}
+            onBack={() => setView({ name: 'library' })}
+            onChapter={(book, chapter) => void openBook(book, chapter)}
+            onRemoved={onRemoved}
+            onLayout={(changed) => {
+              if (reading().book?.id === changed) stale = true;
+            }}
+          />
+        )}
+      </Show>
+
+      <main class="stage" hidden={!typing()}>
         <div class="book">
           <h1>{reading().title}</h1>
           <p>{[reading().author, reading().chapter].filter(Boolean).join(' · ')}</p>

@@ -93,6 +93,13 @@ export function hasWords(text: string): boolean {
   return /\S/u.test(clean(text));
 }
 
+/** How many words `buildPassage` makes of a piece of text, without building them. */
+export function countWords(text: string): number {
+  let count = 0;
+  for (const token of clean(text).split(/\s+/u)) if (token.length > 0) count += 1;
+  return count;
+}
+
 /** True when `typed` (one character) is an accepted key for `char`. */
 export function isAccepted(char: TargetChar, typed: string): boolean {
   return typed.length > 0 && char.accepts.includes(typed);

@@ -16,5 +16,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "e2e", "supabase/tests", "vite.config.ts", "vitest.db.config.ts", "playwright.config.ts"]
+  "include": ["src", "worker/src", "e2e", "supabase/tests", "vite.config.ts", "vitest.db.config.ts", "playwright.config.ts"]
 }

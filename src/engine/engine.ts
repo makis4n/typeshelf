@@ -33,6 +33,12 @@ export interface EngineOptions {
   maxExtra?: number;
   /** How much typing time the recent speed looks back over. Default 60000 ms. */
   recentWindowMs?: number;
+  /**
+   * Index of the word to start at, for resuming. Earlier words show as typed
+   * correctly but earn no speed, accuracy or key records, and cannot be
+   * returned to. Out of range values clamp. Default 0.
+   */
+  startWord?: number;
   /** Called for every key press that was judged against the text. */
   onKey?: (key: KeyRecord) => void;
 }
@@ -124,6 +130,8 @@ export class TypingEngine {
   private readonly maxExtra: number;
   private readonly onKey?: (key: KeyRecord) => void;
 
+  /** Words before this were pre-typed by `startWord`; they are never returned to. */
+  private readonly start: number;
   private index = 0;
   private done: boolean;
   private settled = 0;
@@ -150,6 +158,11 @@ export class TypingEngine {
     this.credit = this.words.map(() => 0);
     this.skipped = this.words.map(() => false);
     this.done = this.words.length === 0;
+
+    const wanted = Number.isNaN(options.startWord) ? 0 : Math.floor(options.startWord ?? 0);
+    this.start = Math.max(0, Math.min(wanted, this.words.length - 1));
+    for (let i = 0; i < this.start; i++) this.typed[i] = this.words[i].chars.map((char) => char.glyph);
+    this.index = this.start;
   }
 
   /** Index of the word being typed. */
@@ -378,7 +391,7 @@ export class TypingEngine {
    * out of reach either way.
    */
   private canReturnTo(i: number): boolean {
-    return i >= 0 && i >= this.floor && (this.freedomMode || !this.isCorrect(i));
+    return i >= 0 && i >= this.floor && i >= this.start && (this.freedomMode || !this.isCorrect(i));
   }
 
   private isCorrect(i: number): boolean {

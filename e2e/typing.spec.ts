@@ -276,6 +276,19 @@ test('spelling converts the text and restarts the chapter', async ({ page }) => 
   expect(await text()).toContain('neighborhood');
 });
 
+test('picking the spelling that is already chosen keeps what was typed', async ({ page }) => {
+  await open(page);
+  await page.keyboard.type('It is');
+  await expect(page.locator('.c.ok')).toHaveCount(4);
+
+  await openSettings(page);
+  await expect(setting(page, 'Spelling', 'As printed')).toHaveAttribute('aria-pressed', 'true');
+  await setting(page, 'Spelling', 'As printed').click();
+  await closeSettings(page);
+
+  await expect(page.locator('.c.ok')).toHaveCount(4); // the chapter did not start over
+});
+
 test('caret style and smooth caret change the caret', async ({ page }, testInfo) => {
   await open(page);
   const caret = page.locator('.ts-caret');

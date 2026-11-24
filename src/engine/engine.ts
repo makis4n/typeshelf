@@ -166,10 +166,13 @@ export class TypingEngine {
    *
    * With no argument the clock rewinds to the last key press, so the idle
    * time that led to the pause is not counted. With a time, the clock keeps
-   * what ran up to that moment and stops there.
+   * what ran up to that moment and stops there. Once the passage is finished
+   * the clock has already stopped at the last key, so nothing more is added.
    */
   pause(at?: number): void {
-    if (at !== undefined && this.lastAt !== null) this.activeMs += Math.max(0, at - this.lastAt);
+    if (at !== undefined && this.lastAt !== null && !this.done) {
+      this.activeMs += Math.max(0, at - this.lastAt);
+    }
     this.lastAt = null;
   }
 

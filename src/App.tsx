@@ -147,6 +147,9 @@ export function App() {
   });
 
   const change = <K extends keyof Settings>(name: K, value: Settings[K]) => {
+    // Picking the option that is already chosen changes nothing; in particular
+    // it must not restart the chapter.
+    if (settings()[name] === value) return;
     const next = { ...settings(), [name]: value };
     setSettings(next);
     saveSettings(next);

@@ -96,6 +96,11 @@ const NONE: Change = { kind: 'none', dirty: [] };
 
 /** How much typing time the recent speed looks back over, unless told otherwise. */
 const DEFAULT_RECENT_WINDOW_MS = 60_000;
+/**
+ * How much typing time of speed samples is kept whatever the recent window
+ * is: five minutes, the longest window the settings offer.
+ */
+const SAMPLE_HISTORY_MS = 300_000;
 
 export class TypingEngine {
   readonly words: readonly Word[];
@@ -419,9 +424,11 @@ export class TypingEngine {
     this.activeMs += gap;
 
     // Record the state just before this key takes effect, then drop samples
-    // older than the window, keeping one at or before its start.
+    // older than the history kept, keeping one at or before its start. The
+    // history is at least SAMPLE_HISTORY_MS, so a window that is lengthened
+    // mid-passage still has the samples it needs.
     this.samples.push({ ms: this.activeMs, chars: this.settled + this.correctCount(this.index) });
-    const start = this.activeMs - this.recentWindowMs;
+    const start = this.activeMs - Math.max(this.recentWindowMs, SAMPLE_HISTORY_MS);
     while (this.samples.length > 1 && this.samples[1].ms <= start) this.samples.shift();
     return gap;
   }

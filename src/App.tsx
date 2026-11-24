@@ -11,7 +11,8 @@ import {
   recentWindowLabel,
   recentWindowMs,
   tapeAnchor,
-  saveSettings,
+  saveSetting,
+  wholePercent,
   type Settings,
 } from './settings';
 import { TypingSurface } from './view/surface';
@@ -152,7 +153,7 @@ export function App() {
     if (settings()[name] === value) return;
     const next = { ...settings(), [name]: value };
     setSettings(next);
-    saveSettings(next);
+    saveSetting(name, value);
 
     if (name === 'spelling') {
       // The words themselves change, so the chapter starts over.
@@ -201,10 +202,14 @@ export function App() {
 
   const percent = () => {
     const { wordsDone, wordsTotal } = stats();
-    return wordsTotal > 0 ? Math.floor((wordsDone / wordsTotal) * 100) : 0;
+    return wordsTotal > 0 ? wholePercent(wordsDone, wordsTotal) : 0;
   };
   const shown = (wpm: number) => (stats().activeMs >= MIN_MS_FOR_SPEED ? String(Math.round(wpm)) : '–');
-  const accuracy = () => Math.floor(stats().accuracy * 100);
+  const accuracy = () => {
+    const { keysCorrect, keysWrong } = stats();
+    const keys = keysCorrect + keysWrong;
+    return keys > 0 ? wholePercent(keysCorrect, keys) : 100;
+  };
 
   const stopNote = () =>
     ({

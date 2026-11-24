@@ -154,6 +154,23 @@ export function loadSettings(): Settings {
   return settings;
 }
 
+/**
+ * A share as a whole percent, rounded down (so 99.6% never shows as 100%).
+ * Multiplying before dividing keeps exact shares exact: 29 of 100 is 29,
+ * where (29 / 100) * 100 falls just short and would round down to 28.
+ */
+export function wholePercent(part: number, total: number): number {
+  return Math.floor((part * 100) / total);
+}
+
+/**
+ * Save one changed setting on top of what is stored now, not on top of this
+ * tab's copy, so two open tabs do not undo each other's choices.
+ */
+export function saveSetting<K extends keyof Settings>(name: K, value: Settings[K]): void {
+  saveSettings({ ...loadSettings(), [name]: value });
+}
+
 export function saveSettings(settings: Settings): void {
   try {
     localStorage.setItem(KEY, JSON.stringify(settings));

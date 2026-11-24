@@ -289,6 +289,27 @@ test('picking the spelling that is already chosen keeps what was typed', async (
   await expect(page.locator('.c.ok')).toHaveCount(4); // the chapter did not start over
 });
 
+test('two open tabs do not undo each other’s settings', async ({ page, context }) => {
+  await open(page);
+  const other = await context.newPage();
+  await open(other);
+
+  await openSettings(other);
+  await setting(other, 'Caret style', 'Block').click();
+  await closeSettings(other);
+
+  // The first tab still holds the settings it loaded before that change.
+  await page.bringToFront();
+  await openSettings(page);
+  await setting(page, 'Smooth caret', 'Fast').click();
+  await closeSettings(page);
+
+  await other.reload();
+  await expect(other.locator('.ts-para').first()).toBeVisible();
+  await expect(other.locator('.ts')).toHaveAttribute('data-caret', 'block');
+  await expect(other.locator('.ts')).toHaveAttribute('data-smooth', 'fast');
+});
+
 test('caret style and smooth caret change the caret', async ({ page }, testInfo) => {
   await open(page);
   const caret = page.locator('.ts-caret');

@@ -416,4 +416,149 @@ describe('a device whose clock runs fast', () => {
     await sync.refresh();
     expect(page.settings).toEqual({ caretStyle: 'underline' });
   });
+
+  // The harder case: the save is made while offline, so the account never gets to correct its stamp.
+  const MINUTE = 60_000;
+
+  it('ends where a correctly set device would after saving offline (F9)', async () => {
+    const real = { time: 10_000_000 };
+    const account = new FakeRemote(() => real.time);
+    const fast = { time: real.time + HOUR };
+    const store = await UserStore.open(new IDBFactory());
+    const { sync } = signIn(store, account, 'user-x', fast);
+    // One contact with the account is enough to learn how far off the clock is.
+    await sync.start();
+    expect(await store.clockOffset()).toBe(-HOUR);
+
+    // Offline: chapter 5 on this device. A minute later the phone, with a correct clock, saves chapter 2.
+    account.offline = true;
+    await store.saveProgress(BOOK, at(5), await store.accountTime(fast.time));
+    await sync.flushNow();
+    real.time += MINUTE;
+    fast.time += MINUTE;
+    account.progress.set(BOOK.id, { bookId: BOOK.id, fingerprint: BOOK.fingerprint, position: at(2), updatedAt: real.time, deviceId: 'phone' });
+
+    // Back online a minute after that. The phone's save is the most recent one.
+    real.time += MINUTE;
+    fast.time += MINUTE;
+    account.offline = false;
+    await sync.refresh();
+    expect((await store.progress(BOOK.id))?.position).toEqual(at(2));
+    expect(account.progress.get(BOOK.id)).toMatchObject({ position: at(2), deviceId: 'phone' });
+  });
+
+  it('ends where a correctly set device would even if it had never met the account before (F9)', async () => {
+    const real = { time: 10_000_000 };
+    const account = new FakeRemote(() => real.time);
+    const fast = { time: real.time + HOUR };
+    const store = await UserStore.open(new IDBFactory());
+
+    // A guest on a fast clock types chapter 5. Nothing has told the browser its clock is off.
+    await store.saveProgress(BOOK, at(5), await store.accountTime(fast.time));
+    expect((await store.progress(BOOK.id))?.updatedAt).toBe(fast.time);
+    real.time += MINUTE;
+    fast.time += MINUTE;
+    account.progress.set(BOOK.id, { bookId: BOOK.id, fingerprint: BOOK.fingerprint, position: at(2), updatedAt: real.time, deviceId: 'phone' });
+    real.time += MINUTE;
+    fast.time += MINUTE;
+
+    // Signing in is the first contact: the clock is measured, and the waiting save is corrected before it is weighed.
+    const { sync } = signIn(store, account, 'user-x', fast);
+    await sync.start();
+    expect((await store.progress(BOOK.id))?.position).toEqual(at(2));
+    expect(account.progress.get(BOOK.id)?.deviceId).toBe('phone');
+  });
+
+  it('keeps its own save when that one really is the most recent', async () => {
+    const real = { time: 10_000_000 };
+    const account = new FakeRemote(() => real.time);
+    const fast = { time: real.time + HOUR };
+    const store = await UserStore.open(new IDBFactory());
+    const { sync } = signIn(store, account, 'user-x', fast);
+    await sync.start();
+
+    account.offline = true;
+    account.progress.set(BOOK.id, { bookId: BOOK.id, fingerprint: BOOK.fingerprint, position: at(8), updatedAt: real.time, deviceId: 'phone' });
+    real.time += MINUTE;
+    fast.time += MINUTE;
+    await store.saveProgress(BOOK, at(3), await store.accountTime(fast.time));
+    account.offline = false;
+    await sync.refresh();
+    // The phone is further on, so the reader is asked; this device's place is not thrown away.
+    expect((await store.progress(BOOK.id))?.position).toEqual(at(3));
+    expect((await store.progress(BOOK.id))?.updatedAt).toBe(real.time);
+  });
+
+  it('does the same for settings changed offline (F9)', async () => {
+    const real = { time: 10_000_000 };
+    const account = new FakeRemote(() => real.time);
+    const fast = { time: real.time + HOUR };
+    const store = await UserStore.open(new IDBFactory());
+    const { sync, page } = signIn(store, account, 'user-x', fast);
+    await sync.start();
+
+    account.offline = true;
+    page.settings = { caretStyle: 'block' };
+    await sync.settingsChanged();
+    real.time += MINUTE;
+    fast.time += MINUTE;
+    account.settings = { data: { caretStyle: 'underline' }, updatedAt: real.time, deviceId: 'phone' };
+    real.time += MINUTE;
+    fast.time += MINUTE;
+    account.offline = false;
+    await sync.refresh();
+    expect(page.settings).toEqual({ caretStyle: 'underline' });
+    expect(account.settings?.deviceId).toBe('phone');
+  });
+
+  it('carries on without a measurement when the account cannot tell the time', async () => {
+    // An account database that has not been given the time function yet.
+    const account = new FakeRemote();
+    const store = await UserStore.open(new IDBFactory());
+    const { sync } = signIn(store, account, 'user-x');
+    await sync.start();
+    await store.saveProgress(BOOK, at(1), 100);
+    await sync.flushNow();
+    expect(sync.current()).toBe('synced');
+    expect(await store.clockOffset()).toBe(0);
+  });
+});
+
+describe('how far off the device clock is', () => {
+  it('is remembered, used for new saves, and outlives the account leaving', async () => {
+    const store = await UserStore.open(new IDBFactory());
+    expect(await store.clockOffset()).toBe(0);
+    await store.setClockOffset(-3_600_000);
+    expect(await store.accountTime(5_000_000)).toBe(1_400_000);
+    const before = Date.now();
+    const saved = await store.saveProgress(BOOK, at(1));
+    expect(saved.updatedAt).toBeGreaterThanOrEqual(before - 3_600_000);
+    expect(saved.updatedAt).toBeLessThanOrEqual(Date.now() - 3_600_000);
+
+    // It describes the device, not the account.
+    await store.setOwner('user-x');
+    await store.endAccountSession({});
+    expect(await store.clockOffset()).toBe(-3_600_000);
+    await store.clear();
+    expect(await store.clockOffset()).toBe(-3_600_000);
+  });
+
+  it('corrects saves still waiting to be sent when it turns out to be different, and only those', async () => {
+    const store = await UserStore.open(new IDBFactory());
+    await store.saveProgress(BOOK, at(1), 5_000_000);
+    await store.acknowledge(await store.pending());
+    await store.saveProgress(book('book-2'), at(2), 5_000_100);
+    await store.markSettingsChanged(5_000_200);
+
+    await store.setClockOffset(-3_600_000);
+    // Already with the account under the time it was sent with: left alone.
+    expect((await store.progress(BOOK.id))?.updatedAt).toBe(5_000_000);
+    expect((await store.progress('book-2'))?.updatedAt).toBe(1_400_100);
+    expect(await store.settingsChangedAt()).toBe(1_400_200);
+
+    // A measurement that only differs by the wobble of the network moves nothing.
+    await store.setClockOffset(-3_600_000 + 800);
+    expect((await store.progress('book-2'))?.updatedAt).toBe(1_400_100);
+    expect(await store.clockOffset()).toBe(-3_600_000 + 800);
+  });
 });

@@ -216,6 +216,63 @@ test.describe('with accounts switched on', () => {
     ).toHaveAttribute('aria-pressed', 'true');
   });
 
+  test('a page that loads offline with a run-out session keeps the reader signed in, and their data', async ({ page }) => {
+    test.setTimeout(150_000);
+    const user = await verifiedAccount('offline');
+    /** One value from the local store's meta table, read straight from IndexedDB. */
+    const meta = (key: string) =>
+      page.evaluate(
+        (name) =>
+          new Promise<unknown>((resolve) => {
+            const opening = indexedDB.open('typeshelf-user');
+            opening.onsuccess = () => {
+              const reading = opening.result.transaction('meta').objectStore('meta').get(name);
+              reading.onsuccess = () => {
+                opening.result.close();
+                resolve(reading.result ?? null);
+              };
+            };
+          }),
+        key,
+      );
+
+    await page.goto(SITE);
+    await typingReady(page);
+    await signIn(page, user.email, user.password);
+    await expect(page.getByRole('button', { name: 'Account', exact: true })).toBeVisible();
+    await expect.poll(() => meta('joined')).toBe(user.id);
+    const device = await meta('deviceId');
+
+    // The access token has run out, and the account service cannot be reached.
+    await page.evaluate(() => {
+      const session = JSON.parse(localStorage.getItem('typeshelf:auth')!);
+      session.expires_at = Math.floor(Date.now() / 1000) - 3600;
+      localStorage.setItem('typeshelf:auth', JSON.stringify(session));
+    });
+    await page.route(`${stack!.url}/**`, (route) => route.abort('internetdisconnected'));
+    await page.reload();
+    await typingReady(page);
+
+    // Once the library has given up trying, the reader is still themselves and the browser still holds their data.
+    await expect(page.getByRole('button', { name: 'Account', exact: true })).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toHaveCount(0);
+    expect(await meta('owner')).toBe(user.id);
+    expect(await meta('joined')).toBe(user.id);
+    expect(await meta('deviceId')).toBe(device);
+    await page.getByRole('button', { name: 'Account', exact: true }).click();
+    const mine = page.getByRole('dialog', { name: 'Your account' });
+    await expect(mine).toContainText(user.email);
+    await expect(mine.locator('[data-sync]')).toHaveAttribute('data-sync', 'failed', { timeout: 30_000 });
+
+    // The connection comes back: the session is renewed and the sync goes through, with nobody signing in again.
+    await page.unroute(`${stack!.url}/**`);
+    await expect(async () => {
+      await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+      await expect(mine.locator('[data-sync]')).toHaveAttribute('data-sync', 'synced', { timeout: 5000 });
+    }).toPass({ timeout: 60_000 });
+    expect(await meta('deviceId')).toBe(device);
+  });
+
   test('a wrong password is refused with a plain sentence', async ({ page }) => {
     const user = await verifiedAccount('wrong');
     await page.goto(SITE);

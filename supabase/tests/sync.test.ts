@@ -14,7 +14,7 @@ import { createClient } from '@supabase/supabase-js';
 import { RejectedError } from '../../src/sync/remote';
 import { supabaseRemote } from '../../src/sync/supabaseRemote';
 import { Sync } from '../../src/sync/sync';
-import { admin, findStack, makeUser, removeUser, type Stack, type TestUser } from './stack';
+import { admin, findStack, makeUser, removeUser, visitor, type Stack, type TestUser } from './stack';
 
 const found = findStack();
 const missing = 'missing' in found ? found.missing : undefined;
@@ -197,6 +197,43 @@ describe.skipIf(missing)('sync against the database', () => {
     await remote.pushProgress([{ bookId: book.id, fingerprint: book.fingerprint, position: { chapter: 2, paragraph: 0, char: 0 }, updatedAt: Date.now() + 5000, deviceId: 'phone' }]);
     await fast.sync.refresh();
     expect((await fast.store.progress(book.id))?.position.chapter).toBe(2);
+  });
+
+  it('tells a signed-in device the time, and nobody else', async () => {
+    const time = await supabaseRemote(user.client, user.id).serverTime();
+    expect(Math.abs(time - Date.now())).toBeLessThan(60_000);
+    const asVisitor = await visitor(stack).rpc('server_time');
+    expect(asVisitor.error?.code).toBe('42501');
+  });
+
+  it('a device an hour fast, saving offline, ends where a correctly set device would', async () => {
+    const book = { id: 'gutenberg:2701', fingerprint: '9'.repeat(64) };
+    const HOUR = 3_600_000;
+    const fastClock = () => Date.now() + HOUR;
+    const store = await UserStore.open(new IDBFactory());
+    const sync = new Sync({
+      store,
+      remote: supabaseRemote(user.client, user.id),
+      userId: user.id,
+      settings: { read: () => ({}), apply: () => {} },
+      now: fastClock,
+      timers: { set: () => 0, clear: () => {} },
+    });
+    await sync.start();
+    // The first contact measured the clock.
+    expect(Math.abs((await store.clockOffset()) + HOUR)).toBeLessThan(5000);
+
+    // "Offline": the device saves chapter 5 and does not send it. Then the phone saves chapter 2.
+    await store.saveProgress(book, { chapter: 5, paragraph: 0, char: 0 }, await store.accountTime(fastClock()));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await supabaseRemote(user.client, user.id).pushProgress([
+      { bookId: book.id, fingerprint: book.fingerprint, position: { chapter: 2, paragraph: 0, char: 0 }, updatedAt: Date.now(), deviceId: 'phone' },
+    ]);
+
+    await sync.refresh();
+    expect((await store.progress(book.id))?.position.chapter).toBe(2);
+    const row = await admin(stack).from('book_progress').select('chapter, device_id').eq('user_id', user.id).eq('book_id', book.id);
+    expect(row.data).toEqual([{ chapter: 2, device_id: 'phone' }]);
   });
 
   it('keeps a different account on the same browser apart', async () => {

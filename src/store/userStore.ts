@@ -49,6 +49,8 @@ const META = 'meta';
 const PARKED = 'parked';
 /** The live stores: everything that belongs to the current owner. */
 const LIVE = [PROGRESS, SESSIONS, KEYS, WORDS, OUTBOX, META];
+/** Two measurements of the clock offset closer than this are the same offset, seen through network delay. */
+const CLOCK_WOBBLE_MS = 5000;
 
 /** Key presses to add to the counts for one key. */
 export interface KeyDelta {
@@ -205,17 +207,74 @@ export class UserStore {
     await finished(tx);
   }
 
+  // ---- the device's clock ---------------------------------------------------
+
+  // "Most recent save wins" only works if devices agree on the time. They do
+  // not always: a clock can be an hour off. So saves are stamped in the
+  // account's time: the device's clock plus an offset the sync measures
+  // whenever it talks to the account. The offset is kept here so it also
+  // holds while offline. It describes the device, not an account, and
+  // outlives sign-outs.
+
+  /** Milliseconds to add to this device's clock to get the account's time. 0 until measured. */
+  async clockOffset(): Promise<number> {
+    return ((await this.meta('clockOffset')) as number | undefined) ?? 0;
+  }
+
+  /** The account's time for a reading of this device's clock. */
+  async accountTime(deviceNow: number = Date.now()): Promise<number> {
+    return deviceNow + (await this.clockOffset());
+  }
+
+  private async offsetIn(tx: IDBTransaction): Promise<number> {
+    return ((await request(tx.objectStore(META).get('clockOffset'))) as number | undefined) ?? 0;
+  }
+
+  /**
+   * Record a fresh measurement of the offset.
+   *
+   * If it differs from the last one by more than the network's wobble, the
+   * saves still waiting to be sent were stamped with the wrong offset, and
+   * are corrected by the difference. (A guest who has never been in touch
+   * with an account is the common case: offset unknown, so zero.) Saves the
+   * account already has are left alone: it stored its own time for those.
+   */
+  async setClockOffset(offset: number): Promise<void> {
+    if (!Number.isFinite(offset)) return;
+    const tx = this.db.transaction([META, OUTBOX, PROGRESS], 'readwrite');
+    const meta = tx.objectStore(META);
+    const shift = offset - (await this.offsetIn(tx));
+    meta.put(offset, 'clockOffset');
+    if (Math.abs(shift) > CLOCK_WOBBLE_MS) {
+      const places = tx.objectStore(PROGRESS);
+      for (const entry of (await request(tx.objectStore(OUTBOX).getAll())) as OutboxEntry[]) {
+        if (entry.kind === 'progress') {
+          const record = (await request(places.get(entry.ref))) as ProgressRecord | undefined;
+          if (record) places.put({ ...record, updatedAt: record.updatedAt + shift });
+        } else if (entry.kind === 'settings') {
+          const at = (await request(meta.get('settingsAt'))) as number | undefined;
+          if (at !== undefined) meta.put(at + shift, 'settingsAt');
+        }
+      }
+    }
+    await finished(tx);
+  }
+
   private async meta(key: string): Promise<unknown> {
     return request(this.db.transaction(META).objectStore(META).get(key));
   }
 
   // ---- place in each book ---------------------------------------------------
 
-  /** Save the reader's place and queue it for the account. */
+  /**
+   * Save the reader's place and queue it for the account.
+   *
+   * @param now the save time, in the account's time. Leave it out to use this device's clock, corrected.
+   */
   async saveProgress(
     book: Pick<Book, 'id' | 'fingerprint'>,
     position: Position,
-    now: number = Date.now(),
+    now?: number,
   ): Promise<ProgressRecord> {
     must(typeof book.id === 'string' && book.id.length >= 1 && book.id.length <= MAX_BOOK_ID_LENGTH, 'a book id of 1 to 200 characters is needed');
     must(FINGERPRINT.test(book.fingerprint), 'a book fingerprint is 64 lowercase hex characters');
@@ -223,10 +282,11 @@ export class UserStore {
       wholeNumber(position.chapter) && wholeNumber(position.paragraph) && wholeNumber(position.char),
       'a position is made of whole numbers, none below zero',
     );
-    must(Number.isFinite(now), 'a save needs a real time');
+    must(now === undefined || Number.isFinite(now), 'a save needs a real time');
 
     const tx = this.db.transaction([PROGRESS, OUTBOX, META], 'readwrite');
     const deviceId = await this.deviceIn(tx);
+    const stamp = now ?? Date.now() + (await this.offsetIn(tx));
     const store = tx.objectStore(PROGRESS);
     const before = (await request(store.get(book.id))) as ProgressRecord | undefined;
     const record: ProgressRecord = {
@@ -234,7 +294,7 @@ export class UserStore {
       fingerprint: book.fingerprint,
       position: { chapter: position.chapter, paragraph: position.paragraph, char: position.char },
       // Never earlier than the save it replaces, even if the clock was set back.
-      updatedAt: Math.max(now, before?.updatedAt ?? 0),
+      updatedAt: Math.max(stamp, before?.updatedAt ?? 0),
       deviceId,
     };
     // An unanswered "continue from there?" survives ordinary saves.
@@ -307,9 +367,10 @@ export class UserStore {
    * Yes moves this device to the other place. No keeps this place and
    * remembers which save was turned down, so it is not asked about again.
    */
-  async answerAhead(bookId: string, accept: boolean, now: number = Date.now()): Promise<ProgressRecord | undefined> {
+  async answerAhead(bookId: string, accept: boolean, now?: number): Promise<ProgressRecord | undefined> {
     const tx = this.db.transaction([PROGRESS, OUTBOX, META], 'readwrite');
     const deviceId = await this.deviceIn(tx);
+    const stamp = now ?? Date.now() + (await this.offsetIn(tx));
     const store = tx.objectStore(PROGRESS);
     const before = (await request(store.get(bookId))) as ProgressRecord | undefined;
     if (!before?.ahead) {
@@ -321,7 +382,7 @@ export class UserStore {
       ...rest,
       position: accept ? ahead.position : before.position,
       // Strictly later than both saves it settles, even on a slow clock.
-      updatedAt: Math.max(now, before.updatedAt + 1, ahead.updatedAt + 1),
+      updatedAt: Math.max(stamp, before.updatedAt + 1, ahead.updatedAt + 1),
       deviceId,
     };
     if (!accept) record.declined = saveTag(ahead);
@@ -450,11 +511,11 @@ export class UserStore {
    *
    * @param as the account noting it; nothing happens if the store is no longer its own
    */
-  async markSettingsChanged(now: number = Date.now(), as?: string): Promise<void> {
+  async markSettingsChanged(now?: number, as?: string): Promise<void> {
     const tx = this.db.transaction([OUTBOX, META], 'readwrite');
     const mine = await this.ownedBy(tx, as);
     if (mine) {
-      tx.objectStore(META).put(now, 'settingsAt');
+      tx.objectStore(META).put(now ?? Date.now() + (await this.offsetIn(tx)), 'settingsAt');
       await this.queue(tx, 'settings', '');
     }
     await finished(tx);
@@ -607,7 +668,7 @@ export class UserStore {
       parked.progress.length + parked.held.length + parked.sessions.length + parked.keys.length + parked.words.length >
         0 || parked.settings !== undefined;
     if (anything) tx.objectStore(PARKED).add(parked);
-    for (const name of LIVE) tx.objectStore(name).clear();
+    await this.empty(tx);
     await finished(tx);
     return true;
   }
@@ -661,7 +722,14 @@ export class UserStore {
    */
   async clear(): Promise<void> {
     const tx = this.db.transaction(LIVE, 'readwrite');
-    for (const name of LIVE) tx.objectStore(name).clear();
+    await this.empty(tx);
     await finished(tx);
+  }
+
+  /** Empty the live stores. What is known about the device's clock is kept: it is not anyone's data. */
+  private async empty(tx: IDBTransaction): Promise<void> {
+    const offset = await this.offsetIn(tx);
+    for (const name of LIVE) tx.objectStore(name).clear();
+    if (offset !== 0) tx.objectStore(META).put(offset, 'clockOffset');
   }
 }

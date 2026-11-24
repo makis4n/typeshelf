@@ -69,6 +69,8 @@ export interface SyncOptions {
 
 export const DEFAULT_INTERVAL_MS = 12_000;
 const MAX_RETRY_MS = 5 * 60_000;
+/** An answer that took longer than this says too little about what time it is right now. */
+const MAX_CLOCK_ROUND_TRIP_MS = 10_000;
 /** Rows per request, so one huge backlog is not one huge request. */
 const CHUNK = 200;
 /** The order kinds are sent in: the reader's place matters most. */
@@ -185,7 +187,7 @@ export class Sync {
   async settingsChanged(): Promise<void> {
     // The account's copy being applied is not a change by the reader.
     if (this.applyingSettings) return;
-    await this.store.markSettingsChanged(this.now(), this.userId);
+    await this.store.markSettingsChanged(await this.accountNow(), this.userId);
   }
 
   // ---- another device is further on -----------------------------------------
@@ -208,7 +210,7 @@ export class Sync {
    * The answer is sent to the account straight away.
    */
   async answerAhead(bookId: string, continueFromThere: boolean): Promise<Position | undefined> {
-    const record = await this.store.answerAhead(bookId, continueFromThere, this.now());
+    const record = await this.store.answerAhead(bookId, continueFromThere, await this.accountNow());
     void this.flushNow();
     return record?.position;
   }
@@ -230,11 +232,41 @@ export class Sync {
 
   private async round(pullFirst: boolean): Promise<void> {
     await this.mine();
-    await this.sendParked();
     // Nothing may be sent before this browser has been merged into the account.
     const joined = (await this.store.joinedAs()) === this.userId;
-    if (pullFirst || !joined) await this.pull(joined);
+    const pulling = pullFirst || !joined;
+    const sending =
+      (await this.store.sendable()).length > 0 || (await this.store.parkedFor(this.userId)).length > 0;
+    // A round with nothing to fetch and nothing to send does not call the account at all.
+    if (!pulling && !sending) return;
+    // Before anything is weighed or sent: save times only compare if they are in the same time.
+    await this.measureClock();
+    await this.sendParked();
+    if (pulling) await this.pull(joined);
     await this.push();
+  }
+
+  /** Now, in the account's time: this device's clock, corrected by what was last measured. */
+  private accountNow(): Promise<number> {
+    return this.store.accountTime(this.now());
+  }
+
+  /**
+   * Ask the account what time it is and remember how far this device's
+   * clock is from it. Best effort: offline, or with an account database
+   * that cannot say, the last measurement stands.
+   */
+  private async measureClock(): Promise<void> {
+    try {
+      const asked = this.now();
+      const account = await this.remote.serverTime();
+      const answered = this.now();
+      if (answered - asked > MAX_CLOCK_ROUND_TRIP_MS) return;
+      // The account read its clock somewhere between the question and the answer.
+      await this.store.setClockOffset(Math.round(account - (asked + answered) / 2));
+    } catch {
+      // Nothing learned this time.
+    }
   }
 
   /** Go no further if the sync was stopped or the store has changed hands (another tab signed out, or in as someone else). */
@@ -411,7 +443,9 @@ export class Sync {
     const localAt = await this.store.settingsChangedAt();
     if (remoteSettings === null) {
       // The account has none: this device's become the account's.
-      if (!joined || localAt !== undefined) await this.store.markSettingsChanged(localAt ?? this.now(), this.userId);
+      if (!joined || localAt !== undefined) {
+        await this.store.markSettingsChanged(localAt ?? (await this.accountNow()), this.userId);
+      }
     } else if (!joined || localAt === undefined || remoteSettings.updatedAt > localAt) {
       await this.mine();
       this.applyingSettings = true;
@@ -502,7 +536,7 @@ export class Sync {
       }
       case 'settings': {
         const deviceId = await store.deviceId();
-        const updatedAt = (await store.settingsChangedAt()) ?? this.now();
+        const updatedAt = (await store.settingsChangedAt()) ?? (await this.accountNow());
         const data = this.settings.read();
         await this.mine();
         const pairs = entries.map((entry) => ({ entry, row: data }));

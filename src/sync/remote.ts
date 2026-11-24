@@ -54,6 +54,13 @@ export interface Remote {
    */
   pushSettings(settings: RemoteSettings): Promise<number | undefined>;
 
+  /**
+   * What time the account's own clock says, in milliseconds since 1970.
+   * May reject (offline, or an account database without the function): the
+   * sync then carries on with what it last measured.
+   */
+  serverTime(): Promise<number>;
+
   /** The account's place in every book (one row per book). */
   pullProgress(): Promise<ProgressRecord[]>;
   /** The account's settings, or null if it has none yet. */

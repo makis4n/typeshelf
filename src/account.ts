@@ -8,7 +8,15 @@
  * shows no sign-in.
  */
 
-import { Auth, linkProblem, OTHER_BROWSER, type AuthState, type Outcome, type SignUpOutcome } from './auth/auth';
+import {
+  Auth,
+  linkProblem,
+  OTHER_BROWSER,
+  type AuthState,
+  type AuthUser,
+  type Outcome,
+  type SignUpOutcome,
+} from './auth/auth';
 import { accountConfig, type AccountConfig } from './auth/config';
 import { onSettingsSaved, parseSettings, type Settings } from './settings';
 import { UserStore } from './store/userStore';
@@ -31,6 +39,21 @@ export interface AccountHooks {
   readSettings(): Settings;
   /** Put the account's settings into effect on the page (and save them). */
   applySettings(next: Settings): void;
+}
+
+/** Where the account library keeps the session in localStorage. */
+const SESSION_KEY = 'typeshelf:auth';
+
+/** Who the session kept in this browser belongs to, if there is one. It may be out of date; see `Auth`. */
+function storedUser(): AuthUser | null {
+  try {
+    const session: unknown = JSON.parse(localStorage.getItem(SESSION_KEY) ?? 'null');
+    const user = (session as { user?: { id?: unknown; email?: unknown } } | null)?.user;
+    if (typeof user?.id !== 'string' || user.id === '') return null;
+    return { id: user.id, email: typeof user.email === 'string' ? user.email : '' };
+  } catch {
+    return null;
+  }
 }
 
 /** How long sign-out waits for the last changes to be sent before going ahead. */
@@ -114,8 +137,8 @@ export class Account {
     // PKCE: a link only signs in the browser that asked for it, because that browser holds
     // the other half of a secret. Without it, anyone could craft a link carrying their own
     // sign-in, and a reader who opened it would be typing into the sender's account.
-    const client = createClient(config.url, config.anonKey, { auth: { flowType: 'pkce' } });
-    const auth = new Auth(client.auth, window.location.origin + window.location.pathname);
+    const client = createClient(config.url, config.anonKey, { auth: { flowType: 'pkce', storageKey: SESSION_KEY } });
+    const auth = new Auth(client.auth, window.location.origin + window.location.pathname, storedUser);
     this.auth = auth;
 
     onSettingsSaved(() => void this.syncing?.settingsChanged());

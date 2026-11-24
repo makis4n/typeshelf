@@ -113,6 +113,59 @@ describe('who is signed in', () => {
   });
 });
 
+describe('a session that could not be confirmed', () => {
+  // The page loaded offline (or the auth server was down) with a session in storage whose
+  // token had run out: the client reports "no session" although nobody signed out.
+  const kept = { id: 'user-anna', email: 'anna@example.test' };
+
+  function offlineSetup(stored: () => typeof kept | null) {
+    const client = new FakeClient();
+    const auth = new Auth(client, HOME, stored);
+    const event = (name: string, session: Session) => {
+      client.emit(name, session);
+      vi.runAllTimers();
+    };
+    return { client, auth, event };
+  }
+
+  it('is still that reader’s, not a sign-out (N1)', () => {
+    const { auth, event } = offlineSetup(() => kept);
+    event('INITIAL_SESSION', null);
+    expect(auth.current()).toEqual({ status: 'signed-in', user: kept });
+  });
+
+  it('carries on unchanged when the session is confirmed later', () => {
+    const { auth, event } = offlineSetup(() => kept);
+    const seen: AuthState[] = [];
+    event('INITIAL_SESSION', null);
+    auth.subscribe((state) => seen.push(state));
+    event('TOKEN_REFRESHED', ANNA);
+    expect(seen).toEqual([]);
+    expect(auth.current().status).toBe('signed-in');
+  });
+
+  it('is a guest when the server has said no: the client then reports a sign-out', () => {
+    const { auth, event } = offlineSetup(() => kept);
+    event('INITIAL_SESSION', null);
+    event('SIGNED_OUT', null);
+    expect(auth.current()).toEqual({ status: 'guest' });
+  });
+
+  it('is a guest when there is nothing in storage', () => {
+    const { auth, event } = offlineSetup(() => null);
+    event('INITIAL_SESSION', null);
+    expect(auth.current()).toEqual({ status: 'guest' });
+  });
+
+  it('is a guest after signing out here, even with the server unreachable', async () => {
+    const { client, auth, event } = offlineSetup(() => kept);
+    event('INITIAL_SESSION', null);
+    client.nextError = { message: 'fetch failed', name: 'AuthRetryableFetchError', status: 0 };
+    await auth.signOut();
+    expect(auth.current()).toEqual({ status: 'guest' });
+  });
+});
+
 describe('arriving through a password-reset link', () => {
   it('is signed in but owes a new password', () => {
     const { auth, event } = setup();

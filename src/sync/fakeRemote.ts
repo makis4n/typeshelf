@@ -47,12 +47,23 @@ export class FakeRemote implements Remote {
   private readonly words = new Map<string, WordCount & { deviceId: string }>();
   settings: RemoteSettings | null = null;
 
-  /** @param now the account's own clock; a save stamped far ahead of it is pulled back to it */
-  constructor(private readonly now: () => number = Date.now) {}
+  /**
+   * @param clock the account's own clock. A save stamped far ahead of it is pulled back to it.
+   *   Tests that run on made-up device times leave it out: the account then cannot be asked
+   *   the time (like a database without the time function), and only real time is "too far ahead".
+   */
+  constructor(private readonly clock?: () => number) {}
 
   private clamp(updatedAt: number): number {
     refuseUnless(Number.isFinite(updatedAt), 'updated_at');
-    return updatedAt > this.now() + FUTURE_ALLOWANCE_MS ? this.now() : updatedAt;
+    const now = (this.clock ?? Date.now)();
+    return updatedAt > now + FUTURE_ALLOWANCE_MS ? now : updatedAt;
+  }
+
+  async serverTime(): Promise<number> {
+    await this.enter('serverTime', []);
+    if (!this.clock) throw new Error('function server_time() does not exist');
+    return this.clock();
   }
 
   /** Number of calls made to one method. */

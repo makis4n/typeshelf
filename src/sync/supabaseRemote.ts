@@ -139,6 +139,14 @@ export function supabaseRemote(client: SupabaseClient, userId: string): Remote {
       return stored[0] ? ms(stored[0].updated_at) : undefined;
     },
 
+    async serverTime(): Promise<number> {
+      const result = await client.rpc('server_time');
+      check(result);
+      const time = ms(String(result.data));
+      if (!Number.isFinite(time)) throw new Error('the account did not say what time it is');
+      return time;
+    },
+
     async pullProgress(): Promise<ProgressRecord[]> {
       const result = await client
         .from('book_progress')

@@ -143,10 +143,12 @@ export class Auth {
   /**
    * @param client     Supabase's auth client, or a stand-in
    * @param redirectTo the page that links in emails, and Google, send the reader back to
+   * @param stored     who the session kept in this browser's storage belongs to, if there is one
    */
   constructor(
     private readonly client: AuthClient,
     private readonly redirectTo: string,
+    private readonly stored: () => AuthUser | null = () => null,
   ) {
     this.subscription = client.onAuthStateChange((event, session) => {
       // Supabase holds a lock while it calls this. Anything that talks to
@@ -183,7 +185,13 @@ export class Auth {
 
   private onEvent(event: string, session: SessionLike | null): void {
     if (!session) {
-      this.set({ status: 'guest' });
+      // "No session" is not always a sign-out. When the page loads offline (or the auth server
+      // is down) with a stored session whose token has run out, the client cannot renew it and
+      // reports none, but keeps it and renews it when it can. That reader is still signed in:
+      // treating them as signed out would empty their browser of their places for nothing.
+      // A real sign-out, or the server refusing the session, arrives as SIGNED_OUT.
+      const kept = event === 'SIGNED_OUT' ? null : this.stored();
+      this.set(kept ? { status: 'signed-in', user: kept } : { status: 'guest' });
       return;
     }
     const user = userOf(session);

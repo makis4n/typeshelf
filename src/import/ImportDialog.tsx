@@ -1,6 +1,5 @@
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import type { Book } from '../book/types';
-import type { BookSummary } from '../store/books';
 import { bookStore as store } from '../store/shared';
 import {
   ACCEPTED_FILES,
@@ -16,43 +15,30 @@ import './import.css';
 const carriesFiles = (event: DragEvent) => event.dataTransfer?.types.includes('Files') ?? false;
 
 /**
- * The import modal: pick or drop an EPUB, text or Markdown file, and open
- * books already imported on this device. A file dropped anywhere on the page
- * opens the modal and is imported.
- *
- * This is the entry point until the library screen exists.
+ * The import modal: pick or drop an EPUB, text or Markdown file. A file
+ * dropped anywhere on the page opens the modal and is imported. Books
+ * already on this device are in the library.
  */
 export function ImportDialog(props: {
   open: boolean;
   /** A file was dropped on the page while the modal was closed. */
   onRequestOpen: () => void;
   onClose: () => void;
-  /** A book was imported, or picked from the list, and should be typed. */
+  /** A book was imported and should be typed. */
   onBook: (book: Book) => void;
 }) {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal('');
   const [over, setOver] = createSignal(false);
-  const [books, setBooks] = createSignal<BookSummary[]>([]);
 
   let dialog!: HTMLDialogElement;
   /** Set while a book is handed over that the modal still has something to say about. */
   let stayOpen = false;
   let input!: HTMLInputElement;
 
-  const refresh = async () => {
-    try {
-      setBooks(await store().list());
-    } catch {
-      // Storage can be unavailable (some private windows). Importing still works; it says the book was not saved.
-      setBooks([]);
-    }
-  };
-
   createEffect(() => {
     if (props.open && !dialog.open) {
       setError('');
-      void refresh();
       dialog.showModal();
     } else if (!props.open && dialog.open && !stayOpen) {
       dialog.close();
@@ -84,17 +70,6 @@ export function ImportDialog(props: {
       setBusy(false);
       input.value = ''; // so picking the same file again is noticed
     }
-  };
-
-  const openStored = async (id: string) => {
-    const book = await store().get(id);
-    if (book) props.onBook(book);
-    else void refresh();
-  };
-
-  const remove = async (id: string) => {
-    await store().delete(id);
-    await refresh();
   };
 
   onMount(() => {
@@ -165,35 +140,6 @@ export function ImportDialog(props: {
           </p>
         </Show>
 
-        <Show when={books().length > 0}>
-          <section class="group" aria-labelledby="import-shelf">
-            <h3 id="import-shelf">On this device</h3>
-            <ul class="shelf">
-              <For each={books()}>
-                {(book) => (
-                  <li class="setting">
-                    <div>
-                      <h4>{book.title}</h4>
-                      <p>
-                        {[book.author, `${book.chapters} ${book.chapters === 1 ? 'chapter' : 'chapters'}`]
-                          .filter(Boolean)
-                          .join(' · ')}
-                      </p>
-                    </div>
-                    <div class="seg">
-                      <button type="button" aria-label={`Type ${book.title}`} onClick={() => void openStored(book.id)}>
-                        Type
-                      </button>
-                      <button type="button" aria-label={`Remove ${book.title}`} onClick={() => void remove(book.id)}>
-                        Remove
-                      </button>
-                    </div>
-                  </li>
-                )}
-              </For>
-            </ul>
-          </section>
-        </Show>
       </div>
     </dialog>
   );

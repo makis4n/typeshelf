@@ -43,13 +43,3 @@
   font-size: 0.85rem;
   line-height: 1.4;
 }
-
-.shelf {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.shelf h4 {
-  overflow-wrap: anywhere;
-}

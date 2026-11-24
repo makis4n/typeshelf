@@ -143,7 +143,7 @@ export function App() {
   onMount(() => {
     start();
     // Accounts load only now, with the typing view already on the page.
-    account.start({ readSettings: settings, applySettings });
+    account.start({ applySettings });
     const timer = setInterval(publish, STATS_REFRESH_MS);
     onCleanup(() => {
       clearInterval(timer);

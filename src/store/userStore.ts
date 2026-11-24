@@ -49,7 +49,7 @@ const META = 'meta';
 const PARKED = 'parked';
 /** The live stores: everything that belongs to the current owner. */
 const LIVE = [PROGRESS, SESSIONS, KEYS, WORDS, OUTBOX, META];
-/** Two measurements of the clock offset closer than this are the same offset, seen through network delay. */
+/** An offset smaller than this is a correct clock seen through network delay, not a clock that is off. */
 const CLOCK_WOBBLE_MS = 5000;
 
 /** Key presses to add to the counts for one key. */
@@ -233,19 +233,25 @@ export class UserStore {
   /**
    * Record a fresh measurement of the offset.
    *
-   * If it differs from the last one by more than the network's wobble, the
-   * saves still waiting to be sent were stamped with the wrong offset, and
-   * are corrected by the difference. (A guest who has never been in touch
-   * with an account is the common case: offset unknown, so zero.) Saves the
-   * account already has are left alone: it stored its own time for those.
+   * The very first measurement on a browser also corrects the saves still
+   * waiting to be sent: they were stamped by a clock nobody had checked (a
+   * guest who has never been in touch with an account), so if it turns out
+   * to be off, they are off by the same amount. Saves the account already
+   * has are left alone: it stored its own time for those.
+   *
+   * Later measurements never move a save. If the offset has changed, the
+   * clock itself was changed at some point, and nothing says whether that
+   * was before or after a waiting save was stamped. A save stamped with a
+   * measured offset was right when it was made, so it is left as it is.
    */
   async setClockOffset(offset: number): Promise<void> {
     if (!Number.isFinite(offset)) return;
     const tx = this.db.transaction([META, OUTBOX, PROGRESS], 'readwrite');
     const meta = tx.objectStore(META);
-    const shift = offset - (await this.offsetIn(tx));
+    const measuredBefore = (await request(meta.get('clockOffset'))) !== undefined;
+    const shift = offset;
     meta.put(offset, 'clockOffset');
-    if (Math.abs(shift) > CLOCK_WOBBLE_MS) {
+    if (!measuredBefore && Math.abs(shift) > CLOCK_WOBBLE_MS) {
       const places = tx.objectStore(PROGRESS);
       for (const entry of (await request(tx.objectStore(OUTBOX).getAll())) as OutboxEntry[]) {
         if (entry.kind === 'progress') {
@@ -728,8 +734,8 @@ export class UserStore {
 
   /** Empty the live stores. What is known about the device's clock is kept: it is not anyone's data. */
   private async empty(tx: IDBTransaction): Promise<void> {
-    const offset = await this.offsetIn(tx);
+    const offset = (await request(tx.objectStore(META).get('clockOffset'))) as number | undefined;
     for (const name of LIVE) tx.objectStore(name).clear();
-    if (offset !== 0) tx.objectStore(META).put(offset, 'clockOffset');
+    if (offset !== undefined) tx.objectStore(META).put(offset, 'clockOffset');
   }
 }

@@ -511,6 +511,55 @@ describe('a device whose clock runs fast', () => {
     expect(account.settings?.deviceId).toBe('phone');
   });
 
+  it('leaves a correctly stamped save alone when it is the clock itself that changes afterwards', async () => {
+    // Signed in with a correct clock; the measurement says so.
+    const real = { time: 10_000_000 };
+    const account = new FakeRemote(() => real.time);
+    const device = { time: real.time };
+    const store = await UserStore.open(new IDBFactory());
+    const { sync } = signIn(store, account, 'user-x', device);
+    await sync.start();
+
+    // Offline. The phone saves chapter 2; ten minutes later this device saves chapter 5, stamped correctly.
+    account.offline = true;
+    account.progress.set(BOOK.id, { bookId: BOOK.id, fingerprint: BOOK.fingerprint, position: at(2), updatedAt: real.time, deviceId: 'phone' });
+    real.time += 10 * MINUTE;
+    device.time += 10 * MINUTE;
+    await store.saveProgress(BOOK, at(5), await store.accountTime(device.time));
+    // Then the device's clock jumps an hour ahead, and it comes back online.
+    device.time += HOUR;
+    account.offline = false;
+    await sync.refresh();
+
+    // Chapter 5 is the most recent save, and stays so.
+    expect((await store.progress(BOOK.id))?.position).toEqual(at(5));
+    expect(account.progress.get(BOOK.id)?.position).toEqual(at(5));
+  });
+
+  it('likewise when a slow clock is put right after a save', async () => {
+    const real = { time: 50_000_000 };
+    const account = new FakeRemote(() => real.time);
+    const slow = { time: real.time - 2 * HOUR };
+    const store = await UserStore.open(new IDBFactory());
+    account.progress.set(BOOK.id, { bookId: BOOK.id, fingerprint: BOOK.fingerprint, position: at(3), updatedAt: real.time, deviceId: 'phone' });
+    const { sync } = signIn(store, account, 'user-x', slow);
+    await sync.start();
+    expect(await store.clockOffset()).toBe(2 * HOUR);
+
+    account.offline = true;
+    real.time += 10 * MINUTE;
+    slow.time += 10 * MINUTE;
+    await store.saveProgress(BOOK, at(5), await store.accountTime(slow.time));
+    // The system corrects the clock.
+    slow.time = real.time;
+    account.offline = false;
+    await sync.refresh();
+
+    // This device's chapter 5 is the newer save: it is not pushed back behind the phone's older chapter 3.
+    expect(await store.progress(BOOK.id)).toMatchObject({ position: at(5), updatedAt: real.time });
+    expect(account.progress.get(BOOK.id)?.position).toEqual(at(5));
+  });
+
   it('carries on without a measurement when the account cannot tell the time', async () => {
     // An account database that has not been given the time function yet.
     const account = new FakeRemote();
@@ -560,5 +609,12 @@ describe('how far off the device clock is', () => {
     await store.setClockOffset(-3_600_000 + 800);
     expect((await store.progress('book-2'))?.updatedAt).toBe(1_400_100);
     expect(await store.clockOffset()).toBe(-3_600_000 + 800);
+
+    // A later measurement that differs a lot means the clock itself was changed at some point.
+    // Nothing says whether that was before or after a waiting save, so the save is left as it is.
+    await store.setClockOffset(0);
+    expect((await store.progress('book-2'))?.updatedAt).toBe(1_400_100);
+    expect(await store.settingsChangedAt()).toBe(1_400_200);
+    expect(await store.clockOffset()).toBe(0);
   });
 });

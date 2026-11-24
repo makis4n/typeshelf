@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_SETTINGS, loadSettings, modeFor, saveSettings, type Settings } from './settings';
+import { DEFAULT_SETTINGS, loadSettings, modeFor, saveSetting, saveSettings, type Settings } from './settings';
 
 const KEY = 'typeshelf:settings';
 
@@ -171,6 +171,25 @@ describe('loadSettings: fresh object', () => {
     const before = { ...DEFAULT_SETTINGS };
     loadSettings().spelling = 'british';
     expect(DEFAULT_SETTINGS).toEqual(before);
+  });
+});
+
+describe('saveSetting', () => {
+  it('changes one setting and keeps what another tab stored meanwhile', () => {
+    // This tab loaded the defaults; another tab has since chosen a block caret.
+    saveSettings({ ...DEFAULT_SETTINGS, caretStyle: 'block' });
+    saveSetting('smoothCaret', 'fast');
+    expect(loadSettings()).toEqual({ ...DEFAULT_SETTINGS, caretStyle: 'block', smoothCaret: 'fast' });
+  });
+
+  it('saves on top of the defaults when nothing is stored', () => {
+    saveSetting('spelling', 'american');
+    expect(loadSettings()).toEqual({ ...DEFAULT_SETTINGS, spelling: 'american' });
+  });
+
+  it('does not throw when storage is blocked', () => {
+    installThrowingStorage();
+    expect(() => saveSetting('spelling', 'american')).not.toThrow();
   });
 });
 

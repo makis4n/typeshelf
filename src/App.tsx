@@ -13,7 +13,8 @@ import {
   recentWindowLabel,
   recentWindowMs,
   tapeAnchor,
-  saveSettings,
+  saveSetting,
+  wholePercent,
   type Settings,
 } from './settings';
 import { TypingSurface } from './view/surface';
@@ -151,9 +152,12 @@ export function App() {
   });
 
   const change = <K extends keyof Settings>(name: K, value: Settings[K]) => {
+    // Picking the option that is already chosen changes nothing; in particular
+    // it must not restart the chapter.
+    if (settings()[name] === value) return;
     const next = { ...settings(), [name]: value };
     setSettings(next);
-    saveSettings(next);
+    saveSetting(name, value);
 
     if (name === 'spelling') {
       // The words themselves change, so the chapter starts over.
@@ -184,7 +188,7 @@ export function App() {
         // Changing the words restarts the chapter. Not under the reader's fingers: it waits for the next start.
         const held = { ...settings(), spelling: next.spelling };
         setSettings(held);
-        saveSettings(held);
+        saveSetting('spelling', next.spelling);
       } else change(name, next[name]);
     }
   };
@@ -215,10 +219,14 @@ export function App() {
 
   const percent = () => {
     const { wordsDone, wordsTotal } = stats();
-    return wordsTotal > 0 ? Math.floor((wordsDone / wordsTotal) * 100) : 0;
+    return wordsTotal > 0 ? wholePercent(wordsDone, wordsTotal) : 0;
   };
   const shown = (wpm: number) => (stats().activeMs >= MIN_MS_FOR_SPEED ? String(Math.round(wpm)) : '–');
-  const accuracy = () => Math.floor(stats().accuracy * 100);
+  const accuracy = () => {
+    const { keysCorrect, keysWrong } = stats();
+    const keys = keysCorrect + keysWrong;
+    return keys > 0 ? wholePercent(keysCorrect, keys) : 100;
+  };
 
   const stopNote = () =>
     ({

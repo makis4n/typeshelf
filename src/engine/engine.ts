@@ -96,6 +96,11 @@ const NONE: Change = { kind: 'none', dirty: [] };
 
 /** How much typing time the recent speed looks back over, unless told otherwise. */
 const DEFAULT_RECENT_WINDOW_MS = 60_000;
+/**
+ * How much typing time of speed samples is kept whatever the recent window
+ * is: five minutes, the longest window the settings offer.
+ */
+const SAMPLE_HISTORY_MS = 300_000;
 
 export class TypingEngine {
   readonly words: readonly Word[];
@@ -166,10 +171,13 @@ export class TypingEngine {
    *
    * With no argument the clock rewinds to the last key press, so the idle
    * time that led to the pause is not counted. With a time, the clock keeps
-   * what ran up to that moment and stops there.
+   * what ran up to that moment and stops there. Once the passage is finished
+   * the clock has already stopped at the last key, so nothing more is added.
    */
   pause(at?: number): void {
-    if (at !== undefined && this.lastAt !== null) this.activeMs += Math.max(0, at - this.lastAt);
+    if (at !== undefined && this.lastAt !== null && !this.done) {
+      this.activeMs += Math.max(0, at - this.lastAt);
+    }
     this.lastAt = null;
   }
 
@@ -416,9 +424,11 @@ export class TypingEngine {
     this.activeMs += gap;
 
     // Record the state just before this key takes effect, then drop samples
-    // older than the window, keeping one at or before its start.
+    // older than the history kept, keeping one at or before its start. The
+    // history is at least SAMPLE_HISTORY_MS, so a window that is lengthened
+    // mid-passage still has the samples it needs.
     this.samples.push({ ms: this.activeMs, chars: this.settled + this.correctCount(this.index) });
-    const start = this.activeMs - this.recentWindowMs;
+    const start = this.activeMs - Math.max(this.recentWindowMs, SAMPLE_HISTORY_MS);
     while (this.samples.length > 1 && this.samples[1].ms <= start) this.samples.shift();
     return gap;
   }

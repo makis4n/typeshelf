@@ -12,7 +12,7 @@ export type ImportErrorCode =
   | 'unreadable'
   /** Read fine, but there is no text in it to type. */
   | 'empty'
-  /** Bigger than any book: refused before it can use up the browser's memory. */
+  /** Bigger than any book, or far too slow to unpack: refused before it can use up the browser's memory or time. */
   | 'too-large';
 
 export class ImportError extends Error {

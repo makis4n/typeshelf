@@ -10,7 +10,13 @@
  * - unpacking a file stops the moment it yields more than it claimed, as soon
  *   as it has yielded all it claimed, or when it stops yielding anything, and
  * - no two entries may share bytes of the file, so the compressed data read
- *   is never more than the file itself.
+ *   is never more than the file itself, and
+ * - unpacking has a time limit. Compressed data can be written so that a few
+ *   bytes cost the inflater millions of steps and yield nothing, which no
+ *   count of bytes can catch; the clock is checked between small steps.
+ *
+ * Unpacking still runs on the page's own thread, so a hostile file can hold
+ * the page for about the time limit before it is refused.
  *
  * Only what EPUBs use is supported: stored and deflated entries, no zip64, no
  * zip-level passwords.
@@ -35,7 +41,7 @@ export interface Zip {
   names: string[];
   /**
    * Unpacks the files `wanted` picks. Throws `too-large` once the files asked
-   * for (over all calls) would pass the byte budget, and `unreadable` for a
+   * for (over all calls) would pass the byte budget or the time limit, and `unreadable` for a
    * file that is damaged or not what the directory says.
    */
   extract(wanted: (name: string) => boolean): Map<string, Uint8Array>;
@@ -44,8 +50,17 @@ export interface Zip {
 const END_RECORD = 0x06054b50;
 const DIRECTORY_RECORD = 0x02014b50;
 const LOCAL_RECORD = 0x04034b50;
-/** Compressed bytes handed to the inflater at a time. Deflate expands at most about 1000 times, so one step yields some megabytes at worst. */
-const STEP = 16 * 1024;
+/**
+ * Compressed bytes handed to the inflater at a time. Small, because the clock
+ * can only be checked between steps, and the costliest input known takes a
+ * few hundred milliseconds for this much.
+ */
+const STEP = 2048;
+/**
+ * The longest all unpacking for one book may take. A long novel takes a few
+ * hundredths of a second, and the full 64 MB allowance under a second on a laptop.
+ */
+export const MAX_UNPACK_MS = 2000;
 /**
  * The most compressed input that can pass without any output in a sound
  * stream: one block stored without compression (65,535 bytes and its header),
@@ -111,7 +126,14 @@ function readDirectory(bytes: Uint8Array, view: DataView): Map<string, Entry> {
   return entries;
 }
 
-function unpack(bytes: Uint8Array, view: DataView, name: string, entry: Entry): Uint8Array {
+/** Time spent unpacking so far, against the limit. Shared by every entry of one zip. */
+interface Clock {
+  now: () => number;
+  spent: number;
+  limit: number;
+}
+
+function unpack(bytes: Uint8Array, view: DataView, name: string, entry: Entry, clock: Clock): Uint8Array {
   if (entry.passwordProtected) throw broken(`"${name}" is password-protected`);
   const { offset } = entry;
   if (offset + 30 > bytes.length || view.getUint32(offset, true) !== LOCAL_RECORD) throw broken(`"${name}" is not where the directory says`);
@@ -140,7 +162,10 @@ function unpack(bytes: Uint8Array, view: DataView, name: string, entry: Entry): 
     for (let at = start; at < end && written < out.length; at += STEP) {
       const step = bytes.subarray(at, Math.min(at + STEP, end));
       silent += step.length;
+      const began = clock.now();
       inflater.push(step, at + STEP >= end);
+      clock.spent += clock.now() - began;
+      if (clock.spent > clock.limit) throw new ImportError('too-large', `unpacking took over ${clock.limit} ms`);
       if (silent > MAX_SILENT_INPUT) throw broken(`"${name}" stops before the size the zip says`);
     }
   } catch (cause) {
@@ -151,12 +176,21 @@ function unpack(bytes: Uint8Array, view: DataView, name: string, entry: Entry): 
   return out;
 }
 
-/** Opens a zip. `maxBytes` is the most unpacked data it will hand out in total. */
-export function openZip(bytes: Uint8Array, maxBytes: number): Zip {
+/**
+ * Opens a zip. `maxBytes` is the most unpacked data it will hand out in total.
+ * `maxMs` is the most time it will spend unpacking, measured with `now`
+ * (tests pass their own clock).
+ */
+export function openZip(
+  bytes: Uint8Array,
+  maxBytes: number,
+  { maxMs = MAX_UNPACK_MS, now = () => performance.now() }: { maxMs?: number; now?: () => number } = {},
+): Zip {
   if (bytes.length < 22) throw broken('too short');
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const entries = readDirectory(bytes, view);
   let handedOut = 0;
+  const clock: Clock = { now, spent: 0, limit: maxMs };
 
   return {
     names: [...entries.keys()],
@@ -165,7 +199,7 @@ export function openZip(bytes: Uint8Array, maxBytes: number): Zip {
       // The whole request is checked against the budget before any of it is unpacked.
       for (const [, entry] of picked) handedOut += entry.size;
       if (handedOut > maxBytes) throw new ImportError('too-large', 'unzipped text');
-      return new Map(picked.map(([name, entry]) => [name, unpack(bytes, view, name, entry)]));
+      return new Map(picked.map(([name, entry]) => [name, unpack(bytes, view, name, entry, clock)]));
     },
   };
 }

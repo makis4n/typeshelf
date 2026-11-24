@@ -267,3 +267,89 @@ describe('markdown: Part headings of every kind', () => {
     ]);
   });
 });
+
+/** Writes bits the way deflate packs them: lowest bit of each byte first. */
+class Bits {
+  private readonly bits: number[] = [];
+  /** A plain number, lowest bit first. */
+  number(value: number, width: number): this {
+    for (let i = 0; i < width; i++) this.bits.push((value >> i) & 1);
+    return this;
+  }
+  /** A Huffman code, highest bit first. */
+  code(value: number, width: number): this {
+    for (let i = width - 1; i >= 0; i--) this.bits.push((value >> i) & 1);
+    return this;
+  }
+  bytes(): Uint8Array {
+    const out = new Uint8Array(Math.ceil(this.bits.length / 8));
+    this.bits.forEach((bit, i) => {
+      out[i >> 3]! |= bit << (i & 7);
+    });
+    return out;
+  }
+}
+
+/**
+ * A 33-byte deflate block that yields nothing and costs the inflater millions
+ * of steps: its table gives all 256 literals a one-bit code (far more than fit)
+ * and the end-of-block mark a 15-bit one, then ends at once.
+ */
+function costlyBlock(): Uint8Array {
+  const bits = new Bits().number(0, 1).number(2, 2).number(0, 5).number(0, 5).number(15, 4);
+  // Lengths of the codes that spell the table itself: symbols 15 and 16 get two bits, symbol 1 gets one.
+  const order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+  for (const symbol of order) bits.number(symbol === 1 ? 1 : symbol === 15 || symbol === 16 ? 2 : 0, 3);
+  const one = () => bits.code(0, 1);
+  const repeatSix = () => bits.code(3, 2).number(3, 2);
+  one();
+  for (let i = 0; i < 42; i++) repeatSix();
+  one().code(0, 1).code(0, 1); // 256 literals of length 1
+  bits.code(2, 2); // end-of-block: length 15
+  one(); // the single distance code
+  bits.code(0, 15); // the end-of-block mark itself
+  return bits.bytes();
+}
+
+describe('zip: compressed data that is costly to unpack and yields nothing', () => {
+  const block = costlyBlock();
+  const hostile = (blocks: number) => {
+    const data = new Uint8Array(block.length * blocks);
+    for (let i = 0; i < blocks; i++) data.set(block, i * block.length);
+    return handZip([{ data, method: 8, claims: 1 }], [['META-INF/container.xml', 0]]);
+  };
+
+  it('is built as intended: 33 bytes, and slow for the inflater (the reason for the limit)', () => {
+    expect(block).toHaveLength(33);
+    const start = performance.now();
+    expect(codeOf(() => openZip(hostile(60), BUDGET, { maxMs: 60_000 }).extract(() => true))).toBe('unreadable');
+    // 2 KB of this takes far longer than megabytes of ordinary data.
+    expect(performance.now() - start).toBeGreaterThan(20);
+  });
+
+  it('gives up when the time limit is passed, long before the data runs out', () => {
+    const zip = hostile(2400); // 78 KB: over 10 seconds of work without a limit
+    const start = performance.now();
+    expect(codeOf(() => openZip(zip, BUDGET, { maxMs: 200 }).extract(() => true))).toBe('too-large');
+    expect(performance.now() - start).toBeLessThan(1500);
+  });
+
+  it('counts time over all the entries of a zip, by the clock it is given', () => {
+    const page = noise(40_000);
+    const part = (): Part => ({ data: deflateSync(page, { level: 6 }), method: 8, claims: page.length });
+    const zip = handZip([part(), part(), part()], [
+      ['a', 0],
+      ['b', 1],
+      ['c', 2],
+    ]);
+    // A clock on which every step takes 5 ms: three entries of about 20 steps each, 100 ms apiece.
+    // No single entry passes 250 ms; the three together do.
+    let time = 0;
+    const slow = { now: () => (time += 5) };
+    expect(codeOf(() => openZip(zip, BUDGET, { ...slow, maxMs: 250 }).extract(() => true))).toBe('too-large');
+    time = 0;
+    expect(openZip(zip, BUDGET, { ...slow, maxMs: 250 }).extract((name) => name !== 'c').size).toBe(2);
+    time = 0;
+    expect(openZip(zip, BUDGET, { ...slow, maxMs: 5000 }).extract(() => true).size).toBe(3);
+  });
+});

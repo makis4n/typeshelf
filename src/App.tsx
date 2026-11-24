@@ -1,11 +1,14 @@
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { account } from './account';
 import { AccountButton } from './auth/AccountButton';
-import type { Book } from './book/types';
-import { TypingEngine, type Stats } from './engine/engine';
+import { openingPlace, placeAfterChapter, PlaceKeeper } from './book/place';
+import { positionAtWordStart, wordAt } from './book/position';
+import type { Book, Position } from './book/types';
+import { TypingEngine, type Change, type Stats } from './engine/engine';
 import { convertSpelling } from './engine/spelling';
 import { buildPassage, type Passage } from './engine/text';
 import { ImportDialog } from './import/ImportDialog';
+import { Logo } from './Logo';
 import { sample } from './sample/pride-and-prejudice';
 import {
   autoPauseMs,
@@ -19,11 +22,45 @@ import {
   wholePercent,
   type Settings,
 } from './settings';
+import { bookStore, userStore } from './store/shared';
+import type { AheadQuestion } from './sync/sync';
 import { TypingSurface } from './view/surface';
 
 type Theme = 'light' | 'dark';
 
 const THEME_KEY = 'typeshelf:theme';
+/** The id of the book that was open last, so a return visit opens it again. */
+const LAST_BOOK_KEY = 'typeshelf:reading';
+
+/** What is on the page: the bundled sample, or one chapter of a book. */
+interface Reading {
+  title: string;
+  author: string;
+  /** The chapter's title, or empty when it has none worth showing. */
+  chapter: string;
+  paragraphs: readonly string[];
+  /** The book the chapter is from. The sample has none, and its place is not kept. */
+  book?: Book;
+  /** Index of the chapter in the book. */
+  index: number;
+}
+
+function lastBookId(): string | null {
+  try {
+    return localStorage.getItem(LAST_BOOK_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberBook(id: string | null): void {
+  try {
+    if (id === null) localStorage.removeItem(LAST_BOOK_KEY);
+    else localStorage.setItem(LAST_BOOK_KEY, id);
+  } catch {
+    // Private windows can refuse storage; the next visit then opens the sample.
+  }
+}
 /** How often the numbers under the text refresh while typing. */
 const STATS_REFRESH_MS = 250;
 /** Speed is hidden until there is enough typing time for it to mean something. */
@@ -82,14 +119,23 @@ export function App() {
   const [settings, setSettings] = createSignal<Settings>(loadSettings());
   const [theme, setTheme] = createSignal<Theme>(currentTheme());
 
-  // What is on the page: the bundled sample, or the first chapter of an imported book.
-  const [reading, setReading] = createSignal<typeof sample>(sample);
+  const [reading, setReading] = createSignal<Reading>({ ...sample, index: 0 });
   const [importing, setImporting] = createSignal(false);
+  /** Another device is further on in the open book, and the reader has yet to say which place to keep. */
+  const [ahead, setAhead] = createSignal<AheadQuestion | null>(null);
 
   const passageFor = (current: Settings): Passage =>
     buildPassage(reading().paragraphs.map((paragraph) => convertSpelling(paragraph, current.spelling)));
 
   const [stats, setStats] = createSignal<Stats>(new TypingEngine(passageFor(settings())).stats());
+
+  /** True from a restart that left a saved place behind until the next key press: reloading still undoes it. */
+  const [restartNote, setRestartNote] = createSignal(false);
+
+  /** Saves the place in the open book. Undefined for the sample. */
+  let keeper: PlaceKeeper | undefined;
+  /** The chapter on the page as printed, which saved places are measured against (see `book/place.ts`). */
+  let printed: Passage | undefined;
 
   let host!: HTMLDivElement;
   let dialog!: HTMLDialogElement;
@@ -117,6 +163,8 @@ export function App() {
       {
         onChange: (change) => {
           if (change.kind === 'finished') publish();
+          if (change.kind !== 'none') setRestartNote(false);
+          notePlace(change);
         },
       },
       {
@@ -131,27 +179,174 @@ export function App() {
     );
   };
 
-  const start = () => {
+  /**
+   * Put the chapter in `reading` on the page and start typing it.
+   *
+   * @param from Where to start: a saved place, or a word index. The chapter's first word when left out.
+   */
+  const start = (from: { place?: Position; word?: number } = {}) => {
     const current = settings();
     passage = passageFor(current);
+    printed = current.spelling === 'original' ? passage : buildPassage(reading().paragraphs);
+    // Conversion swaps words one for one. Should it ever not, places follow the text on the page.
+    if (printed.words.length !== passage.words.length) printed = passage;
     engine = new TypingEngine(passage, {
       mode: modeFor(current.stopOnError),
       strictSpace: current.strictSpace,
       freedomMode: current.freedomMode,
       autoParagraph: current.autoParagraph,
       recentWindowMs: recentWindowMs(current.recentWindow),
+      startWord: from.place ? wordAt(printed, from.place) : (from.word ?? 0),
     });
+    setRestartNote(false);
     mount();
     publish();
     surface?.focus();
   };
 
-  onMount(() => {
+  /**
+   * Go back to the chapter's first word. The saved place is left alone (see
+   * `notePlace`), and the reader is told so while reloading can still undo it.
+   */
+  const restart = () => {
+    const undoable = reading().book !== undefined && engine !== undefined && (engine.wordIndex > 0 || engine.finished);
     start();
+    setRestartNote(undoable);
+  };
+
+  /**
+   * Note the reader's place after a key press that moved them to another
+   * word. Restarting a chapter saves nothing by itself: the old place stands
+   * until a word is completed, so a slip on Restart can be undone by reloading.
+   */
+  const notePlace = (change: Change) => {
+    const { book, index } = reading();
+    if (!book || !keeper || !printed || !engine) return;
+    if (change.kind === 'finished') keeper.save(placeAfterChapter(book.chapters.length, printed, index));
+    else if (change.kind === 'advanced' || change.kind === 'retreated') {
+      keeper.save(positionAtWordStart(printed, index, engine.wordIndex));
+    }
+  };
+
+  /** Show the chapter a place is in, and start typing from that place. */
+  const showChapter = (book: Book, saved: Position | undefined) => {
+    const { chapter: index, place } = openingPlace(book.chapters.length, saved);
+    const chapter = book.chapters[index];
+    if (!chapter) return;
+    setReading({
+      title: book.title,
+      author: book.author,
+      chapter: chapter.title === book.title ? '' : chapter.title,
+      paragraphs: chapter.paragraphs,
+      book,
+      index,
+    });
+    start({ place });
+  };
+
+  /** Counts book openings, so a slow one cannot land on top of a later one. */
+  let opening = 0;
+
+  /** Type a book from where the reader left it. Choosing a chapter comes with the library. */
+  const openBook = async (book: Book) => {
+    if (book.chapters.length === 0) return;
+    const turn = ++opening;
+    setImporting(false);
+    const next = new PlaceKeeper(userStore, book);
+    const saved = await next.read();
+    if (turn !== opening) return;
+    keeper = next;
+    setAhead(null);
+    rememberBook(book.id);
+    showChapter(book, saved);
+    // The account may know of a place saved elsewhere since; `afterSync` picks up what it brings.
+    void account.sync()?.refresh();
+    void checkAhead();
+  };
+
+  /** Open the book that was open last time. The sample when there is none, or it is no longer on this device. */
+  const reopen = async (id: string) => {
+    const turn = opening;
+    let book: Book | undefined;
+    try {
+      book = await bookStore().get(id);
+    } catch {
+      // Storage cannot be read; the sample it is.
+    }
+    // The reader opened something else while this one was loading.
+    if (turn !== opening) return;
+    if (book && book.chapters.length > 0) await openBook(book);
+    else {
+      rememberBook(null);
+      if (!engine) start();
+    }
+  };
+
+  /** Ask "continue from there?" if the open book has that question waiting. */
+  const checkAhead = async () => {
+    const book = reading().book;
+    const sync = account.sync();
+    if (!book || !sync) {
+      setAhead(null);
+      return;
+    }
+    const question = await sync.aheadFor(book.id).catch(() => undefined);
+    if (reading().book?.id === book.id) setAhead(question ?? null);
+  };
+
+  /** The reader's answer to "continue from there?". */
+  const answerAhead = async (continueFromThere: boolean) => {
+    const question = ahead();
+    const book = reading().book;
+    const sync = account.sync();
+    const mine = keeper;
+    setAhead(null);
+    giveBackKeyboard();
+    if (!question || !book || !sync || !mine || book.id !== question.bookId) return;
+    // The answer must be the newest save, so anything still being written goes first.
+    await mine.settled();
+    const place = await sync.answerAhead(book.id, continueFromThere).catch(() => undefined);
+    if (keeper !== mine) return;
+    await mine.read();
+    if (continueFromThere && place && keeper === mine) showChapter(book, place);
+  };
+
+  /**
+   * After a round with the account: it may have moved this device to a place
+   * saved elsewhere more recently, or left a question for the reader.
+   */
+  const afterSync = async () => {
+    const book = reading().book;
+    const mine = keeper;
+    if (!book || !mine) return;
+    const moved = await mine.movedElsewhere();
+    if (keeper !== mine) return;
+    if (moved) showChapter(book, moved);
+    await checkAhead();
+  };
+
+  const nextChapter = () => {
+    const { book, index } = reading();
+    if (book && index + 1 < book.chapters.length) showChapter(book, { chapter: index + 1, paragraph: 0, char: 0 });
+  };
+  const hasNextChapter = () => {
+    const { book, index } = reading();
+    return book !== undefined && index + 1 < book.chapters.length;
+  };
+
+  onMount(() => {
+    const last = lastBookId();
+    if (last === null) start();
+    else void reopen(last);
     // Accounts load only now, with the typing view already on the page.
     account.start({ readSettings: settings, applySettings });
+    const stopWatching = account.subscribe((view) => {
+      if (view.sync === null) setAhead(null);
+      else if (view.sync !== 'syncing') void afterSync();
+    });
     const timer = setInterval(publish, STATS_REFRESH_MS);
     onCleanup(() => {
+      stopWatching();
       clearInterval(timer);
       surface?.destroy();
     });
@@ -166,8 +361,8 @@ export function App() {
     saveSetting(name, value);
 
     if (name === 'spelling') {
-      // The words themselves change, so the chapter starts over.
-      start();
+      // The words themselves change, so the text is rebuilt around the word the reader is on.
+      start({ word: engine?.wordIndex ?? 0 });
     } else if (engine) {
       engine.mode = modeFor(next.stopOnError);
       engine.strictSpace = next.strictSpace;
@@ -191,7 +386,7 @@ export function App() {
     for (const name of Object.keys(next) as (keyof Settings)[]) {
       if (next[name] === settings()[name]) continue;
       if (name === 'spelling' && engine && engine.stats().activeMs > 0) {
-        // Changing the words restarts the chapter. Not under the reader's fingers: it waits for the next start.
+        // Changing the words rebuilds the text and resets the numbers. Not under the reader's fingers: it waits for the next start.
         const held = { ...settings(), spelling: next.spelling };
         setSettings(held);
         saveSetting('spelling', next.spelling);
@@ -222,15 +417,6 @@ export function App() {
     setImporting(false);
     giveBackKeyboard();
   };
-  /** Type the first chapter of an imported book. Choosing chapters and resuming come with the library. */
-  const openBook = (book: Book) => {
-    const first = book.chapters[0];
-    if (!first) return;
-    const chapter = first.title === book.title ? '' : first.title;
-    setReading({ title: book.title, author: book.author, chapter, paragraphs: first.paragraphs });
-    setImporting(false);
-    start();
-  };
   const onDialogClick = (event: MouseEvent) => {
     // A click on the dimmed area outside the panel lands on the dialog itself.
     if (event.target === dialog) closeSettings();
@@ -257,9 +443,12 @@ export function App() {
   return (
     <div class="page">
       <header class="top">
-        <span class="mark">typeshelf</span>
+        <span class="mark">
+          <Logo size={28} />
+          typeshelf
+        </span>
         <nav class="controls" aria-label="Page actions">
-          <button type="button" onClick={start}>
+          <button type="button" onClick={restart}>
             Restart
           </button>
           <button type="button" onClick={() => setImporting(true)}>
@@ -311,6 +500,11 @@ export function App() {
           data-auto-paragraph={settings().autoParagraph ? 'on' : 'off'}
         />
 
+        {/* Looks like the surface's own "Paused" note, and gives way to it. */}
+        <div class="restart-note" classList={{ shown: restartNote() }} role="status">
+          {restartNote() ? 'Didn’t mean to restart? Reload the page to go back to your place.' : ''}
+        </div>
+
         <dl class="meter">
           <div>
             <dt>{recentWindowLabel(settings().recentWindow)}</dt>
@@ -344,10 +538,35 @@ export function App() {
           </div>
         </dl>
 
+        <Show when={ahead()}>
+          {(question) => (
+            <section class="done ahead" role="alert">
+              <h2>Another device is further on in this book.</h2>
+              <Show when={question().there.position.chapter !== question().here.chapter}>
+                <p>
+                  It is at chapter {question().there.position.chapter + 1}; here you are at chapter{' '}
+                  {question().here.chapter + 1}.
+                </p>
+              </Show>
+              <button type="button" onClick={() => void answerAhead(true)}>
+                Continue from there
+              </button>
+              <button type="button" class="plain" onClick={() => void answerAhead(false)}>
+                Stay here
+              </button>
+            </section>
+          )}
+        </Show>
+
         <Show when={stats().finished}>
           <section class="done" aria-live="polite">
-            <h2>Chapter complete.</h2>
-            <button type="button" onClick={start}>
+            <h2>{hasNextChapter() || !reading().book ? 'Chapter complete.' : 'Book complete.'}</h2>
+            <Show when={hasNextChapter()}>
+              <button type="button" onClick={nextChapter}>
+                Next chapter
+              </button>
+            </Show>
+            <button type="button" classList={{ plain: hasNextChapter() }} onClick={restart}>
               Type it again
             </button>
           </section>
@@ -442,7 +661,7 @@ export function App() {
             <Choice
               id="spelling"
               title="Spelling"
-              note="Convert common words to British or American spelling. Restarts the chapter."
+              note="Convert common words to British or American spelling."
               value={settings().spelling}
               options={[
                 { value: 'original', label: 'As printed' },
@@ -588,7 +807,7 @@ export function App() {
         open={importing()}
         onRequestOpen={() => setImporting(true)}
         onClose={closeImport}
-        onBook={openBook}
+        onBook={(book) => void openBook(book)}
       />
     </div>
   );

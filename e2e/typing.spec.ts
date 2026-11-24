@@ -256,7 +256,7 @@ test('strict space turns a stray space into a mistake', async ({ page }) => {
   await expect(page.locator('.w').first().locator('.c').first()).toHaveClass('c bad');
 });
 
-test('spelling converts the text and restarts the chapter', async ({ page }) => {
+test('spelling converts the text and keeps the reader on the word they were on', async ({ page }) => {
   await open(page);
   const text = () => page.locator('.ts-scroll').innerText();
   expect(await text()).toContain('neighbourhood');
@@ -268,7 +268,8 @@ test('spelling converts the text and restarts the chapter', async ({ page }) => 
 
   expect(await text()).toContain('neighborhood');
   expect(await text()).not.toContain('neighbourhood');
-  await expect(page.locator('.c.ok')).toHaveCount(0); // the chapter started over
+  // "It" stays typed; the half-typed "is" is the word to carry on from.
+  await expect(page.locator('.c.ok')).toHaveCount(2);
 
   // The choice survives a reload.
   await page.reload();

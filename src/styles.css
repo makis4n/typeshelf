@@ -11,6 +11,8 @@
   --heading: #8a6212;
   --bad: #b5352a;
   --bad-wash: rgb(181 53 42 / 0.13);
+  /* The logo's outline: navy on paper, black at night, where navy reads as a murky blue. */
+  --logo-line: #0b0b5e;
 
   --text-font: 'Literata Variable', 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
   --ui-font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
@@ -29,6 +31,7 @@
     --heading: #d9b25f;
     --bad: #f07a6c;
     --bad-wash: rgb(240 122 108 / 0.16);
+    --logo-line: #000;
     color-scheme: dark;
   }
 }
@@ -44,6 +47,7 @@
   --heading: #d9b25f;
   --bad: #f07a6c;
   --bad-wash: rgb(240 122 108 / 0.16);
+  --logo-line: #000;
   color-scheme: dark;
 }
 
@@ -77,10 +81,18 @@ body {
 }
 
 .mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
   font-family: var(--text-font);
   font-weight: 600;
   font-size: 1.15rem;
   letter-spacing: 0.01em;
+}
+
+.logo {
+  flex: none;
+  color: var(--logo-line);
 }
 
 .controls {
@@ -338,6 +350,22 @@ button:disabled:hover {
   color: var(--bg);
   background: var(--accent);
   border-color: var(--accent);
+}
+
+.done button.plain {
+  color: inherit;
+  background: none;
+  border-color: var(--rule);
+}
+
+.done.ahead {
+  flex-wrap: wrap;
+}
+
+.done.ahead p {
+  margin: 0;
+  color: var(--soft);
+  font: 400 0.9rem var(--ui-font);
 }
 
 /* ---- typing surface --------------------------------------------------------- */
@@ -651,7 +679,8 @@ button:disabled:hover {
   font-size: 16px;
 }
 
-.ts-hint {
+.ts-hint,
+.restart-note {
   /* Fixed, so it is centred in the window rather than in the text area. */
   position: fixed;
   z-index: 1;
@@ -673,6 +702,15 @@ button:disabled:hover {
 .ts-paused .ts-hint {
   opacity: 1;
   transition-delay: 200ms;
+}
+
+.restart-note.shown {
+  opacity: 1;
+}
+
+/* Never two notes on top of each other: "Paused" wins. */
+.ts-paused ~ .restart-note.shown {
+  opacity: 0;
 }
 
 @keyframes ts-nope {

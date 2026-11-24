@@ -8,7 +8,7 @@
  * and read from there.
  */
 
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Browser, type Page } from '@playwright/test';
 import { ACCOUNT_PORT } from '../playwright.config';
 import { admin, visitor, type Stack } from '../supabase/tests/stack';
 
@@ -60,6 +60,43 @@ async function signIn(page: Page, email: string, password: string): Promise<void
   await dialog.getByLabel('Email').fill(email);
   await dialog.getByLabel('Password').fill(password);
   await dialog.getByRole('button', { name: 'Sign in' }).click();
+}
+
+/** A small book, imported from a text file as a reader would. The same bytes give the same book on every browser. */
+const BOOK = 'The colour of the sea was grey. Nobody spoke at all.\n\nA gull cried over the wall.';
+
+async function importBook(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await page
+    .locator('dialog.import input[type=file]')
+    .evaluate((input: HTMLInputElement, text) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([text], 'sea.txt', { type: 'text/plain' }));
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }, BOOK);
+  await expect(page.locator('.book h1')).toHaveText('sea');
+  await expect(page.locator('.ts')).toHaveClass(/ts-focused/);
+}
+
+/** How far into its paragraph the account has the reader, once the place has been sent. */
+async function accountOffset(userId: string): Promise<number | undefined> {
+  const { data } = await admin(stack!).from('book_progress').select('char_offset').eq('user_id', userId).maybeSingle();
+  return (data as { char_offset: number } | null)?.char_offset;
+}
+
+/** Browser one of a two-browser test: signed in, three words into the book, and the place sent to the account. */
+async function typeThreeWordsElsewhere(browser: Browser, user: { id: string; email: string; password: string }) {
+  const one = await (await browser.newContext()).newPage();
+  await one.goto(SITE);
+  await typingReady(one);
+  await signIn(one, user.email, user.password);
+  await expect(one.getByRole('button', { name: 'Account', exact: true })).toBeVisible();
+  await importBook(one);
+  await one.keyboard.type('The colour of ');
+  // It goes up with the next batch, with nobody pressing anything.
+  await expect.poll(() => accountOffset(user.id), { timeout: 25_000 }).toBe('The colour of '.length);
+  return one;
 }
 
 test('with no account service configured there is no sign-in and nothing is loaded for it', async ({ page }) => {
@@ -426,5 +463,75 @@ test.describe('with accounts switched on', () => {
       })
       .toBe('underline');
     await expect(page.locator('.surface')).toHaveAttribute('data-caret', 'underline');
+  });
+  test('a place typed in one browser is where the book opens in another', async ({ browser }) => {
+    test.setTimeout(60_000);
+    const user = await verifiedAccount('place');
+    await typeThreeWordsElsewhere(browser, user);
+
+    // Browser two has never seen the book. It has no place of its own, so it takes the account's without asking.
+    const two = await (await browser.newContext()).newPage();
+    await two.goto(SITE);
+    await typingReady(two);
+    await signIn(two, user.email, user.password);
+    await expect(two.getByRole('button', { name: 'Account', exact: true })).toBeVisible();
+    await importBook(two);
+    await expect(two.locator('.c.ok')).toHaveCount('Thecolourof'.length);
+    await expect(two.getByText('Another device is further on')).toHaveCount(0);
+
+    // Typing carries on from there.
+    await two.locator('.ts').click();
+    await two.keyboard.type('the ');
+    await expect(two.locator('.c.ok')).toHaveCount('Thecolourofthe'.length);
+  });
+
+  test('a browser that is further back asks before jumping, and "Continue from there" jumps', async ({ browser }, testInfo) => {
+    test.setTimeout(60_000);
+    const user = await verifiedAccount('ahead-yes');
+    await typeThreeWordsElsewhere(browser, user);
+
+    // Browser two types one word as a guest, then signs in to the same account.
+    const two = await (await browser.newContext()).newPage();
+    await two.goto(SITE);
+    await typingReady(two);
+    await importBook(two);
+    await two.keyboard.type('The ');
+    await signIn(two, user.email, user.password);
+
+    const question = two.getByRole('alert').filter({ hasText: 'Another device is further on' });
+    await expect(question).toBeVisible();
+    // Nothing has moved yet.
+    await expect(two.locator('.c.ok')).toHaveCount('The'.length);
+    await two.screenshot({ path: testInfo.outputPath('continue-from-there.png') });
+    await question.getByRole('button', { name: 'Continue from there' }).click();
+    await expect(question).toHaveCount(0);
+    await expect(two.locator('.c.ok')).toHaveCount('Thecolourof'.length);
+
+    // The answer sticks: a reload opens at the same place and does not ask again.
+    await two.reload();
+    await expect(two.locator('.book h1')).toHaveText('sea');
+    await expect(two.locator('.c.ok')).toHaveCount('Thecolourof'.length);
+    await expect(two.getByRole('button', { name: 'Account', exact: true })).toBeVisible();
+    await expect(question).toHaveCount(0);
+  });
+
+  test('"Stay here" keeps this browser\'s place and makes it the account\'s', async ({ browser }) => {
+    test.setTimeout(60_000);
+    const user = await verifiedAccount('ahead-no');
+    await typeThreeWordsElsewhere(browser, user);
+
+    const two = await (await browser.newContext()).newPage();
+    await two.goto(SITE);
+    await typingReady(two);
+    await importBook(two);
+    await two.keyboard.type('The ');
+    await signIn(two, user.email, user.password);
+
+    const question = two.getByRole('alert').filter({ hasText: 'Another device is further on' });
+    await question.getByRole('button', { name: 'Stay here' }).click();
+    await expect(question).toHaveCount(0);
+    await expect(two.locator('.c.ok')).toHaveCount('The'.length);
+    // The reader's choice is the newest save, so the account now has this place.
+    await expect.poll(() => accountOffset(user.id), { timeout: 25_000 }).toBe('The '.length);
   });
 });

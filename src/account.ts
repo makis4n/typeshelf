@@ -19,7 +19,7 @@ import {
 } from './auth/auth';
 import { accountConfig, type AccountConfig } from './auth/config';
 import { onSettingsSaved, type Settings } from './settings';
-import { UserStore } from './store/userStore';
+import { userStore } from './store/shared';
 import { storedSettingsPort } from './sync/settingsPort';
 import { supabaseRemote } from './sync/supabaseRemote';
 import { Sync, type SyncState } from './sync/sync';
@@ -135,7 +135,7 @@ export class Account {
     }
     const cameWithCode = address.searchParams.has('code');
 
-    const [{ createClient }, store] = await Promise.all([import('@supabase/supabase-js'), UserStore.open()]);
+    const [{ createClient }, store] = await Promise.all([import('@supabase/supabase-js'), userStore()]);
     // PKCE: a link only signs in the browser that asked for it, because that browser holds
     // the other half of a secret. Without it, anyone could craft a link carrying their own
     // sign-in, and a reader who opened it would be typing into the sender's account.

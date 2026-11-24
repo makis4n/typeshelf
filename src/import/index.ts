@@ -86,8 +86,15 @@ export interface Imported {
 /**
  * Imports a file and keeps it on the device. The same file imported twice is
  * recognised by its fingerprint and stored once.
+ *
+ * `parse` is what reads the file. The page passes `parseInBackground`, so a
+ * file that is slow to read cannot freeze it.
  */
-export async function importFile(store: BookStore, file: PickedFile): Promise<Imported> {
+export async function importFile(
+  store: BookStore,
+  file: PickedFile,
+  parse: (file: PickedFile) => Promise<Book> = parseBook,
+): Promise<Imported> {
   if (file.bytes.length === 0) throw new ImportError('empty');
   if (file.bytes.length > MAX_FILE_BYTES) throw new ImportError('too-large', 'file');
   try {
@@ -98,7 +105,7 @@ export async function importFile(store: BookStore, file: PickedFile): Promise<Im
     // Storage cannot be read. The file itself may be fine, so carry on and parse it.
   }
 
-  const book = await parseBook(file);
+  const book = await parse(file);
   try {
     return { book, summary: await store.save(book), alreadyHad: false, stored: true };
   } catch {

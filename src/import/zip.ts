@@ -83,7 +83,16 @@ function decodeName(bytes: Uint8Array): string {
   } catch {
     name = new TextDecoder('latin1').decode(bytes);
   }
-  return name.normalize('NFC');
+  return sameName(name);
+}
+
+/**
+ * Composed and decomposed accents made one, for comparing names. Left alone
+ * for names longer than any real path: normalising is slow on long runs of
+ * accents, and such a name matches nothing anyway.
+ */
+export function sameName(name: string): string {
+  return name.length <= 1024 ? name.normalize('NFC') : name;
 }
 
 function readDirectory(bytes: Uint8Array, view: DataView): Map<string, Entry> {

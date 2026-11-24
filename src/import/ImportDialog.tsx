@@ -9,6 +9,7 @@ import {
   MAX_FILE_BYTES,
   NOT_SAVED_NOTICE,
 } from './index';
+import { parseInBackground } from './background';
 import './import.css';
 
 let sharedStore: BookStore | undefined;
@@ -68,7 +69,7 @@ export function ImportDialog(props: {
       // Checked before reading, so an enormous file is never loaded into memory.
       if (file.size > MAX_FILE_BYTES) throw new ImportError('too-large', 'file');
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const { book, stored } = await importFile(store(), { name: file.name, bytes });
+      const { book, stored } = await importFile(store(), { name: file.name, bytes }, parseInBackground);
       // A book that could not be kept is put on the page all the same, and the modal stays to say so.
       stayOpen = !stored;
       props.onBook(book);

@@ -18,7 +18,7 @@ import { ImportError } from './errors';
 import { descendants, firstDescendant, parseMarkup, textOf, type Element } from './markup';
 import { assembleBook, type DraftChapter, type FileInfo } from './shape';
 import { extractBlocks, type Block } from './xhtml';
-import { openZip } from './zip';
+import { openZip, sameName } from './zip';
 
 const CONTAINER = 'META-INF/container.xml';
 const ENCRYPTION = 'META-INF/encryption.xml';
@@ -52,14 +52,14 @@ export function resolveHref(from: string, href: string): { path: string; fragmen
   const hash = href.indexOf('#');
   const fragment = hash < 0 ? '' : decodePath(href.slice(hash + 1));
   const target = decodePath(hash < 0 ? href : href.slice(0, hash));
-  if (target.length === 0) return { path: from.normalize('NFC'), fragment };
+  if (target.length === 0) return { path: sameName(from), fragment };
 
   const parts = target.startsWith('/') ? [] : from.split('/').slice(0, -1);
   for (const part of target.split('/')) {
     if (part === '..') parts.pop();
     else if (part !== '.' && part !== '') parts.push(part);
   }
-  return { path: parts.join('/').normalize('NFC'), fragment };
+  return { path: sameName(parts.join('/')), fragment };
 }
 
 /**
@@ -114,10 +114,13 @@ function authorOf(metadata: Element): string {
 
 /** Splits one document's blocks into chapters, at the places the table of contents points to. */
 function chaptersOfDocument(blocks: Block[], entries: TocEntry[]): { tocTitle?: string; blocks: Block[] }[] {
-  const segments = [{ tocTitle: entries.find((entry) => entry.fragment === '')?.title, blocks: [] as Block[] }];
+  // The first entry for a place wins, as when reading the table of contents from the top.
+  const titles = new Map<string, string>();
+  for (const entry of entries) if (!titles.has(entry.fragment)) titles.set(entry.fragment, entry.title);
+  const segments = [{ tocTitle: titles.get(''), blocks: [] as Block[] }];
   for (const block of blocks) {
     if (block.kind === 'anchor') {
-      segments.push({ tocTitle: entries.find((entry) => entry.fragment === block.id)?.title, blocks: [] });
+      segments.push({ tocTitle: titles.get(block.id), blocks: [] });
     } else {
       segments[segments.length - 1]!.blocks.push(block);
     }
@@ -134,10 +137,12 @@ export function parseEpub(bytes: Uint8Array, file: FileInfo): Book {
   if (!containerBytes) throw new ImportError('unreadable', 'no META-INF/container.xml');
 
   const rootfiles = [...descendants(parseMarkup(decodeXml(containerBytes)), 'rootfile')];
-  const opfPath = decodePath(
-    (rootfiles.find((rootfile) => rootfile.attrs['media-type'] === 'application/oebps-package+xml') ?? rootfiles[0])
-      ?.attrs['full-path'] ?? '',
-  ).normalize('NFC');
+  const opfPath = sameName(
+    decodePath(
+      (rootfiles.find((rootfile) => rootfile.attrs['media-type'] === 'application/oebps-package+xml') ?? rootfiles[0])
+        ?.attrs['full-path'] ?? '',
+    ),
+  );
   const encryptionBytes = meta.get(ENCRYPTION);
   const encrypted = encryptionBytes ? encryptedPaths(decodeXml(encryptionBytes)) : new Set<string>();
   if (encrypted.has(opfPath)) throw new ImportError('drm');
@@ -169,9 +174,14 @@ export function parseEpub(bytes: Uint8Array, file: FileInfo): Book {
   // The reading order. Items marked linear="no" are extras outside the main text.
   const spineElement = firstDescendant(pkg, 'spine');
   const spine: string[] = [];
+  const inSpine = new Set<string>();
   for (const ref of spineElement ? descendants(spineElement, 'itemref') : []) {
     const item = items.get(ref.attrs['idref'] ?? '');
-    if (item && ref.attrs['linear'] !== 'no') spine.push(item.path);
+    // A document is read once, where it first comes in the reading order.
+    if (item && ref.attrs['linear'] !== 'no' && !inSpine.has(item.path)) {
+      inSpine.add(item.path);
+      spine.push(item.path);
+    }
   }
   if (spine.length === 0) throw new ImportError('unreadable', 'the package lists no documents to read');
 
@@ -198,13 +208,20 @@ export function parseEpub(bytes: Uint8Array, file: FileInfo): Book {
   const ncx = toc.length === 0 ? read(ncxPath) : undefined;
   if (ncx !== undefined) toc = tocFromNcx(ncxPath!, ncx);
 
+  const tocByPath = new Map<string, TocEntry[]>();
+  for (const entry of toc) {
+    const list = tocByPath.get(entry.path);
+    if (list) list.push(entry);
+    else tocByPath.set(entry.path, [entry]);
+  }
+
   const chapters: DraftChapter[] = [];
   let pendingTitle = '';
   for (const path of spine) {
     const source = read(path);
     // A chapter must never vanish without a word: a book with a hole in it is refused.
     if (source === undefined) throw new ImportError('unreadable', `"${path}" is listed but not in the file`);
-    const entries = toc.filter((entry) => entry.path === path);
+    const entries = tocByPath.get(path) ?? [];
     const anchors = new Set(entries.map((entry) => entry.fragment).filter(Boolean));
 
     for (const segment of chaptersOfDocument(extractBlocks(source, anchors), entries)) {

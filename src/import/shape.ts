@@ -31,6 +31,19 @@ export interface Draft {
   chapters: DraftChapter[];
 }
 
+/** More combining marks on one letter than any writing system uses. */
+const MARK_RUN = /(\p{M}{8})\p{M}+/gu;
+
+/**
+ * Collapses whitespace and cuts absurd runs of combining marks (accents piled
+ * on one letter by the thousand). Such runs are not text anyone can type, and
+ * normalising them, which the typing engine does to every paragraph, takes
+ * time that grows with the square of their length.
+ */
+export function tidy(text: string): string {
+  return collapse(text.replace(MARK_RUN, '$1'));
+}
+
 /** A readable title from a file name: `my_book-final.txt` gives `my book-final`. */
 export function titleFromFileName(fileName: string): string {
   const base = fileName.replace(/^.*[\\/]/, '').replace(/\.[A-Za-z0-9]{1,8}$/, '');
@@ -42,13 +55,13 @@ export function titleFromFileName(fileName: string): string {
  * dropped; a book left with nothing to type is an `empty` error.
  */
 export function assembleBook(draft: Draft, file: FileInfo): Book {
-  const title = collapse(draft.title ?? '') || titleFromFileName(file.fileName);
+  const title = tidy(draft.title ?? '') || tidy(titleFromFileName(file.fileName));
 
   const kept = draft.chapters
     .map((chapter) => ({
-      title: collapse(chapter.title ?? ''),
+      title: tidy(chapter.title ?? ''),
       // Exactly the paragraphs the typing engine keeps, so paragraph numbers mean the same in both.
-      paragraphs: chapter.paragraphs.map(collapse).filter(hasWords),
+      paragraphs: chapter.paragraphs.map(tidy).filter(hasWords),
     }))
     .filter((chapter) => chapter.paragraphs.length > 0);
   if (kept.length === 0) throw new ImportError('empty');
@@ -62,8 +75,8 @@ export function assembleBook(draft: Draft, file: FileInfo): Book {
   return {
     id: importId(file.fingerprint),
     title,
-    author: collapse(draft.author ?? ''),
-    language: collapse(draft.language ?? '') || 'und',
+    author: tidy(draft.author ?? ''),
+    language: tidy(draft.language ?? '') || 'und',
     source: draft.source,
     fingerprint: file.fingerprint,
     chapters,

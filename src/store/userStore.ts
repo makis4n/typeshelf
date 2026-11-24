@@ -14,6 +14,7 @@ import type { Book, Position } from '../book/types';
 import {
   MAX_KEY_LENGTH,
   MAX_WORD_LENGTH,
+  saveTag,
   type AheadPlace,
   type KeyCount,
   type OutboxEntry,
@@ -185,43 +186,72 @@ export class UserStore {
   }
 
   /**
-   * Take a place that came from the account as it is. Nothing is queued, and
-   * a waiting local change to the same book is dropped, because the account
-   * already has this.
+   * Weigh the account's copy of a place against this device's, and act on
+   * the verdict in the same breath, so a save made at that very moment
+   * cannot slip in between the look and the write.
+   *
+   * - `take-remote`: this device moves to the account's place. Nothing is
+   *   queued, and a waiting local change to the book is dropped, because the
+   *   account's copy has just won.
+   * - `ask`: this device stays where it is and remembers the other place,
+   *   so the reader can be asked when the book is opened.
+   * - `keep-local`: nothing changes.
    */
-  async adoptProgress(record: ProgressRecord): Promise<void> {
+  async reconcileProgress(
+    remote: ProgressRecord,
+    decide: (local: ProgressRecord | undefined) => 'keep-local' | 'take-remote' | 'ask',
+  ): Promise<'keep-local' | 'take-remote' | 'ask'> {
     const tx = this.db.transaction([PROGRESS, OUTBOX], 'readwrite');
-    const { ahead: _ahead, declined: _declined, ...clean } = record;
-    tx.objectStore(PROGRESS).put(clean);
-    tx.objectStore(OUTBOX).delete(`progress:${record.bookId}`);
-    await finished(tx);
-  }
-
-  /** Remember (or forget) that another device is further on in this book. */
-  async setAhead(bookId: string, ahead: AheadPlace | undefined): Promise<void> {
-    await this.patchProgress(bookId, (record) => {
-      if (ahead) record.ahead = ahead;
-      else delete record.ahead;
-    });
-  }
-
-  /** Remember that the reader said no to another device's save. */
-  async setDeclined(bookId: string, declined: string): Promise<void> {
-    await this.patchProgress(bookId, (record) => {
-      record.declined = declined;
-      delete record.ahead;
-    });
-  }
-
-  private async patchProgress(bookId: string, patch: (record: ProgressRecord) => void): Promise<void> {
-    const tx = this.db.transaction(PROGRESS, 'readwrite');
     const store = tx.objectStore(PROGRESS);
-    const record = (await request(store.get(bookId))) as ProgressRecord | undefined;
-    if (record) {
-      patch(record);
-      store.put(record);
+    const local = (await request(store.get(remote.bookId))) as ProgressRecord | undefined;
+    const verdict = decide(local);
+    if (verdict === 'take-remote') {
+      const { ahead: _ahead, declined: _declined, ...clean } = remote;
+      store.put(clean);
+      tx.objectStore(OUTBOX).delete(`progress:${remote.bookId}`);
+    } else if (verdict === 'ask' && local) {
+      const ahead: AheadPlace = {
+        position: remote.position,
+        updatedAt: remote.updatedAt,
+        deviceId: remote.deviceId,
+      };
+      store.put({ ...local, ahead });
     }
     await finished(tx);
+    return verdict;
+  }
+
+  /**
+   * Record the reader's answer to "continue from there?".
+   *
+   * Either way the result is saved as a brand new save and queued, so the
+   * choice the reader just made is the most recent one everywhere.
+   * Yes moves this device to the other place. No keeps this place and
+   * remembers which save was turned down, so it is not asked about again.
+   */
+  async answerAhead(bookId: string, accept: boolean, now: number = Date.now()): Promise<ProgressRecord | undefined> {
+    const deviceId = await this.deviceId();
+    const tx = this.db.transaction([PROGRESS, OUTBOX, META], 'readwrite');
+    const store = tx.objectStore(PROGRESS);
+    const before = (await request(store.get(bookId))) as ProgressRecord | undefined;
+    if (!before?.ahead) {
+      await finished(tx);
+      return before;
+    }
+    const { ahead, declined: _declined, ...rest } = before;
+    const record: ProgressRecord = {
+      ...rest,
+      position: accept ? ahead.position : before.position,
+      // Strictly later than both saves it settles, even on a slow clock.
+      updatedAt: Math.max(now, before.updatedAt + 1, ahead.updatedAt + 1),
+      deviceId,
+    };
+    if (!accept) record.declined = saveTag(ahead);
+    store.put(record);
+    await this.queue(tx, 'progress', bookId);
+    await finished(tx);
+    this.changed();
+    return record;
   }
 
   // ---- sessions -------------------------------------------------------------

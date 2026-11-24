@@ -17,8 +17,11 @@ const stack = found as Stack;
 const FINGERPRINT = 'a'.repeat(64);
 const BOOK = 'gutenberg:1342';
 
+const TABLES = ['book_progress', 'typing_sessions', 'key_stats', 'word_stats', 'user_settings'] as const;
+type Row = Record<string, unknown>;
+
 /** A row of each table, as its owner would write it. */
-function rowsFor(userId: string) {
+function rowsFor(userId: string): Record<(typeof TABLES)[number], Row> {
   return {
     book_progress: {
       user_id: userId,
@@ -50,10 +53,9 @@ function rowsFor(userId: string) {
       updated_at: '2026-11-01T10:00:00Z',
       device_id: 'device-a',
     },
-  } as const;
+  };
 }
 
-const TABLES = ['book_progress', 'typing_sessions', 'key_stats', 'word_stats', 'user_settings'] as const;
 const VIEWS = ['key_totals', 'word_totals'] as const;
 
 describe.skipIf(missing)('access rules', () => {

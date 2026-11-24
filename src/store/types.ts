@@ -82,3 +82,8 @@ export interface OutboxEntry {
 /** Limits shared with the database, so a row it would refuse is never queued. */
 export const MAX_KEY_LENGTH = 8;
 export const MAX_WORD_LENGTH = 64;
+
+/** A name for one particular save by one device, to remember that the reader said no to it. */
+export function saveTag(save: { deviceId: string; updatedAt: number }): string {
+  return `${save.deviceId}@${save.updatedAt}`;
+}

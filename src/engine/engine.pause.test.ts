@@ -32,6 +32,18 @@ describe('pause', () => {
     expect(engine.stats(50_000).activeMs).toBe(2500);
   });
 
+  it('pause(at) after the passage is finished adds nothing to the final time', () => {
+    const engine = new TypingEngine(buildPassage(['ab cd']));
+    let at = 0;
+    for (const char of 'ab cd') engine.type(char, (at += 100));
+    expect(engine.finished).toBe(true);
+    const final = engine.stats(at);
+
+    engine.pause(at + 6000); // focus leaves the text six seconds later
+    expect(engine.stats(at + 60_000).activeMs).toBe(final.activeMs);
+    expect(engine.stats(at + 60_000).wpm).toBe(final.wpm);
+  });
+
   it('the next key restarts the clock without counting the paused stretch', () => {
     const engine = make();
     engine.type('a', 0);

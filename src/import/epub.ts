@@ -12,13 +12,13 @@
  * error. Scrambled fonts ("font obfuscation") use the same file and are fine.
  */
 
-import { unzipSync } from 'fflate';
 import type { Book } from '../book/types';
 import { decodeXml } from './decode';
 import { ImportError } from './errors';
 import { descendants, firstDescendant, parseMarkup, textOf, type Element } from './markup';
 import { assembleBook, type DraftChapter, type FileInfo } from './shape';
 import { extractBlocks, type Block } from './xhtml';
+import { openZip } from './zip';
 
 const CONTAINER = 'META-INF/container.xml';
 const ENCRYPTION = 'META-INF/encryption.xml';
@@ -38,45 +38,6 @@ interface TocEntry {
  * a few megabytes; a zip can claim far more in a tiny file and exhaust the browser's memory.
  */
 export const MAX_UNZIPPED_BYTES = 64 * 1024 * 1024;
-
-/**
- * A zip entry's name as the package file would write it. Zip tools that do not
- * flag their names as UTF-8 have them read one byte per character
- * ("Ã\u009cber" for "Über"); those are read again as UTF-8. Composed and
- * decomposed accents are treated as the same name.
- */
-function entryName(name: string): string {
-  let fixed = name;
-  if (/[\u0080-\u00ff]/.test(name) && !/[^\u0000-\u00ff]/.test(name)) {
-    try {
-      fixed = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(name, (char) => char.charCodeAt(0)));
-    } catch {
-      // Not UTF-8 after all: the name really is those characters.
-    }
-  }
-  return fixed.normalize('NFC');
-}
-
-/** Unzips the entries `wanted` picks, keyed by `entryName`. Refuses to inflate more than `MAX_UNZIPPED_BYTES`. */
-function unzip(bytes: Uint8Array, wanted: (name: string) => boolean): Map<string, Uint8Array> {
-  let total = 0;
-  let files: Record<string, Uint8Array>;
-  try {
-    files = unzipSync(bytes, {
-      filter: (file) => {
-        if (!wanted(entryName(file.name))) return false;
-        // The size is checked before anything is inflated.
-        total += file.originalSize;
-        if (total > MAX_UNZIPPED_BYTES) throw new ImportError('too-large', 'unzipped text');
-        return true;
-      },
-    });
-  } catch (cause) {
-    if (cause instanceof ImportError) throw cause;
-    throw new ImportError('unreadable', `not a readable zip file (${String(cause)})`);
-  }
-  return new Map(Object.entries(files).map(([name, data]) => [entryName(name), data]));
-}
 
 function decodePath(path: string): string {
   try {
@@ -167,7 +128,8 @@ function chaptersOfDocument(blocks: Block[], entries: TocEntry[]): { tocTitle?: 
 /** Imports an EPUB file. */
 export function parseEpub(bytes: Uint8Array, file: FileInfo): Book {
   // First pass: only the small files that describe the book.
-  const meta = unzip(bytes, (name) => name.startsWith('META-INF/') || /\.opf$/i.test(name));
+  const zip = openZip(bytes, MAX_UNZIPPED_BYTES);
+  const meta = zip.extract((name) => name === CONTAINER || name === ENCRYPTION);
   const containerBytes = meta.get(CONTAINER);
   if (!containerBytes) throw new ImportError('unreadable', 'no META-INF/container.xml');
 
@@ -179,7 +141,7 @@ export function parseEpub(bytes: Uint8Array, file: FileInfo): Book {
   const encryptionBytes = meta.get(ENCRYPTION);
   const encrypted = encryptionBytes ? encryptedPaths(decodeXml(encryptionBytes)) : new Set<string>();
   if (encrypted.has(opfPath)) throw new ImportError('drm');
-  const opfBytes = meta.get(opfPath) ?? unzip(bytes, (name) => name === opfPath).get(opfPath);
+  const opfBytes = zip.extract((name) => name === opfPath).get(opfPath);
   if (!opfBytes) throw new ImportError('unreadable', 'no package file');
 
   const pkg = parseMarkup(decodeXml(opfBytes));
@@ -224,7 +186,7 @@ export function parseEpub(bytes: Uint8Array, file: FileInfo): Book {
 
   // Second pass: the documents themselves. Images, fonts and styles stay zipped.
   const needed = new Set([...spine, navPath, ncxPath]);
-  const files = unzip(bytes, (name) => needed.has(name));
+  const files = zip.extract((name) => needed.has(name));
   const read = (path: string | undefined) => {
     const found = path !== undefined && !encrypted.has(path) ? files.get(path) : undefined;
     return found ? decodeXml(found) : undefined;

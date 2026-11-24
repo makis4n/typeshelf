@@ -21,7 +21,9 @@ const RULE = /^(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/;
 const LIST_ITEM = /^(?:[-*+]|(\d{1,9})[.)])\s+(?:\[[ xX]\]\s+)?(.*)$/;
 const LINK_DEFINITION = /^\[[^\]]+\]:\s*\S+/;
 const FOOTNOTE_DEFINITION = /^\[\^[^\]]+\]:/;
-const PART_HEADING = /^(?:part|book|volume)\b/i;
+/** "Part One", "Book II", "Volume 3": a heading that groups chapters. "Part of the Furniture" is not one. */
+const PART_HEADING =
+  /^(?:part|book|volume)\s+(?:the\s+)?(?:\d+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last)(?![\w'’])/i;
 const TABLE_DIVIDER = /^\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?$/;
 
 /** Removes `<!-- comments -->`. An opening with no closing is left as written. */
@@ -43,7 +45,11 @@ function unwrapCode(text: string): string {
   const runs = [...text.matchAll(/`+/g)].map((match) => ({ at: match.index, length: match[0].length }));
   // For each length, the runs of that length, and how far along that list we are.
   const sameLength = new Map<number, number[]>();
-  runs.forEach((run, i) => sameLength.set(run.length, [...(sameLength.get(run.length) ?? []), i]));
+  runs.forEach((run, i) => {
+    const list = sameLength.get(run.length);
+    if (list) list.push(i);
+    else sameLength.set(run.length, [i]);
+  });
   const next = new Map<number, number>();
 
   let out = '';
@@ -194,8 +200,22 @@ export function draftFromMarkdown(markdown: string): Draft {
   let chapterLevel = levels.find((level) => counts.get(level)! >= 2) ?? levels[0] ?? 0;
   // "Part One", "Book II" over a repeated lower level: the parts group chapters, they are not the chapters.
   const below = levels.find((level) => level > chapterLevel && counts.get(level)! >= 2);
-  const groups = blocks.filter((block) => block.kind === 'heading' && block.level === chapterLevel);
-  if (below !== undefined && groups.every((block) => PART_HEADING.test(block.text))) chapterLevel = below;
+  // Other headings may sit beside the parts ("Prologue", "Epilogue"), as long as every lower heading is inside a part.
+  if (below !== undefined) {
+    let insidePart = false;
+    let parts = 0;
+    let strays = 0;
+    for (const block of blocks) {
+      if (block.kind !== 'heading') continue;
+      if (block.level === chapterLevel) {
+        insidePart = PART_HEADING.test(block.text);
+        if (insidePart) parts++;
+      } else if (block.level === below && !insidePart) {
+        strays++;
+      }
+    }
+    if (parts > 0 && strays === 0) chapterLevel = below;
+  }
 
   const firstHeading = blocks.find((block) => block.kind === 'heading');
   const titleHeading =

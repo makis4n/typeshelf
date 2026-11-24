@@ -70,8 +70,8 @@ function blocksOf(text: string): string[][] {
   const blocks: string[][] = [];
   let current: string[] = [];
   const close = () => {
-    // A long run of lines of very uneven length was never wrapped: each line is its own paragraph.
-    if (isRagged(current)) for (const line of current) blocks.push([line]);
+    // A long run of lines that were not broken by wrapping: each line is its own paragraph.
+    if (isUnwrapped(current)) for (const line of current) blocks.push([line]);
     else if (current.length > 0) blocks.push(current);
     current = [];
   };
@@ -83,20 +83,28 @@ function blocksOf(text: string): string[][] {
   return blocks;
 }
 
-/** More lines than a wrapped paragraph plausibly has before its evenness is questioned. */
+/** More lines than a wrapped paragraph plausibly has before its line breaks are questioned. */
 const LONG_BLOCK = 40;
 
 /**
- * Wrapping fills every line but the last to nearly the same width. A long
- * block where many lines stop well short of the longest one is a list of
- * one-line paragraphs (or verse) written without blank lines between them.
+ * Wrapping breaks a line only when the next word would not fit. So in wrapped
+ * text, the first word of a line never had room at the end of the line before.
+ * A long block where it often did have room is a list of one-line paragraphs
+ * (or verse) written without blank lines between them.
+ *
+ * The width is taken from the lines themselves, a little under the longest,
+ * so one overlong line does not make every other line look short.
  */
-function isRagged(block: string[]): boolean {
+function isUnwrapped(block: string[]): boolean {
   if (block.length <= LONG_BLOCK) return false;
-  const body = block.slice(0, -1);
-  const widest = Math.max(...body.map((line) => line.length));
-  const full = body.filter((line) => line.length >= widest * 0.6).length;
-  return full < body.length * 0.85;
+  const lengths = block.slice(0, -1).map((line) => line.length).sort((a, b) => a - b);
+  const width = lengths[Math.floor(lengths.length * 0.8)]!;
+  let roomy = 0;
+  for (let i = 0; i + 1 < block.length; i++) {
+    const firstWord = /^\S+/.exec(block[i + 1]!)![0];
+    if (block[i]!.length + 1 + firstWord.length <= width) roomy++;
+  }
+  return roomy > (block.length - 1) * 0.15;
 }
 
 /** "Title: Emma" and "Author: Jane Austen" lines, as found at the top of Project Gutenberg files. */
@@ -105,20 +113,29 @@ function headerField(text: string, name: string): string | undefined {
   return new RegExp(`^[ \\t]*${name}:[ \\t]*(\\S.*)$`, 'im').exec(top)?.[1]?.trim();
 }
 
-const GUTENBERG_START = /^[ \t]*\*{3}\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK[^*]{0,400}\*{3}[ \t]*$/im;
-const GUTENBERG_END =
-  /^[ \t]*(?:\*{3}\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK|End of (?:the )?Project Gutenberg(?:['’]s)? )/im;
+const GUTENBERG_START = /^[ \t]*\*{3} ?START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK[^*]{0,400}\*{3}[ \t]*$/m;
+/** The END line, or its older wording, which only counts as a line standing on its own. */
+const GUTENBERG_END = /^[ \t]*\*{3} ?END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK\b/;
+const GUTENBERG_OLD_END = /^[ \t]*End of (?:[Tt]he )?Project Gutenberg(?:['’]s| E[Bb]ook| Etext)\b/;
 
 /**
  * Project Gutenberg files wrap the book in a notice at the top and a long
  * licence at the bottom. Only the book between the two marker lines is kept.
- * Text without the markers is returned as it is.
+ * The markers are matched exactly as Project Gutenberg writes them, and an
+ * ending is only looked for after a START line: a book that merely mentions
+ * Project Gutenberg is returned as it is.
  */
 export function stripGutenbergNotice(text: string): string {
-  const start = GUTENBERG_START.exec(text);
-  const book = start ? text.slice(start.index + start[0].length) : text;
-  const end = GUTENBERG_END.exec(book);
-  return end ? book.slice(0, end.index) : book;
+  const unix = text.replace(/\r\n?/g, '\n');
+  const start = GUTENBERG_START.exec(unix);
+  if (!start) return text;
+  const lines = unix.slice(start.index + start[0].length).split('\n');
+  const blank = (line: string | undefined) => line === undefined || line.trim() === '';
+  const end = lines.findIndex(
+    (line, i) =>
+      GUTENBERG_END.test(line) || (GUTENBERG_OLD_END.test(line) && blank(lines[i - 1]) && blank(lines[i + 1])),
+  );
+  return (end < 0 ? lines : lines.slice(0, end)).join('\n');
 }
 
 /** Splits decoded text into chapters. Exported for tests. */

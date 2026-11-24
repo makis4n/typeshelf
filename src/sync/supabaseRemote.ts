@@ -1,0 +1,171 @@
+/**
+ * The account's database, reached through Supabase. This file only moves
+ * rows: the rules (newest save wins, own rows only) live in the database
+ * itself, in `supabase/migrations`.
+ *
+ * Only the type of the Supabase client is imported here, so this file does
+ * not pull the library into the first page load.
+ */
+
+import type { SupabaseClient } from '@supabase/supabase-js';
+import type { KeyCount, ProgressRecord, SessionRecord, WordCount } from '../store/types';
+import { RejectedError, type Remote, type RemoteSettings, type StoredStamp } from './remote';
+
+/** A time as the database wants it. A time that is not a time is the row's fault, not the connection's. */
+const iso = (ms: number) => {
+  if (!Number.isFinite(ms)) throw new RejectedError('a row carries a time that is not a time');
+  return new Date(ms).toISOString();
+};
+const ms = (isoTime: string) => new Date(isoTime).getTime();
+
+/** Supabase reports failure in the result instead of throwing; the sync expects a rejection. */
+function check(result: { error: { message: string; code?: string } | null }): void {
+  const error = result.error;
+  if (!error) return;
+  // Postgres classes 22 (a value it cannot store) and 23 (a broken table rule):
+  // the rows are at fault, and sending them again cannot work.
+  if (/^(22|23)/.test(error.code ?? '')) throw new RejectedError(error.message);
+  throw new Error(error.message);
+}
+
+interface ProgressRow {
+  book_id: string;
+  fingerprint: string;
+  chapter: number;
+  paragraph: number;
+  char_offset: number;
+  updated_at: string;
+  device_id: string;
+}
+
+export function supabaseRemote(client: SupabaseClient, userId: string): Remote {
+  return {
+    async pushProgress(rows: readonly ProgressRecord[]): Promise<StoredStamp[]> {
+      const result = await client
+        .from('book_progress')
+        .upsert(
+          rows.map((row) => ({
+            user_id: userId,
+            book_id: row.bookId,
+            fingerprint: row.fingerprint,
+            chapter: row.position.chapter,
+            paragraph: row.position.paragraph,
+            char_offset: row.position.char,
+            updated_at: iso(row.updatedAt),
+            device_id: row.deviceId,
+          })),
+          { onConflict: 'user_id,book_id' },
+        )
+        // Rows the account kept, with the save time it stored them under.
+        .select('book_id, updated_at');
+      check(result);
+      return ((result.data ?? []) as { book_id: string; updated_at: string }[]).map((row) => ({
+        bookId: row.book_id,
+        updatedAt: ms(row.updated_at),
+      }));
+    },
+
+    async pushSessions(rows: readonly SessionRecord[]) {
+      check(
+        await client.from('typing_sessions').upsert(
+          rows.map((row) => ({
+            user_id: userId,
+            id: row.id,
+            book_id: row.bookId,
+            started_at: iso(row.startedAt),
+            ended_at: iso(row.endedAt),
+            active_ms: Math.round(row.activeMs),
+            words: Math.round(row.words),
+            wpm: row.wpm,
+            accuracy: row.accuracy,
+            device_id: row.deviceId,
+          })),
+          // A session is written once; one sent again is left alone.
+          { onConflict: 'user_id,id', ignoreDuplicates: true },
+        ),
+      );
+    },
+
+    async pushKeyCounts(deviceId: string, rows: readonly KeyCount[]) {
+      const updatedAt = iso(Date.now());
+      check(
+        await client.from('key_stats').upsert(
+          rows.map((row) => ({
+            user_id: userId,
+            device_id: deviceId,
+            key: row.key,
+            hits: row.hits,
+            misses: row.misses,
+            total_ms: row.totalMs,
+            updated_at: updatedAt,
+          })),
+          { onConflict: 'user_id,device_id,key' },
+        ),
+      );
+    },
+
+    async pushWordCounts(deviceId: string, rows: readonly WordCount[]) {
+      const updatedAt = iso(Date.now());
+      check(
+        await client.from('word_stats').upsert(
+          rows.map((row) => ({
+            user_id: userId,
+            device_id: deviceId,
+            word: row.word,
+            hits: row.hits,
+            misses: row.misses,
+            updated_at: updatedAt,
+          })),
+          { onConflict: 'user_id,device_id,word' },
+        ),
+      );
+    },
+
+    async pushSettings(settings: RemoteSettings): Promise<number | undefined> {
+      const result = await client
+        .from('user_settings')
+        .upsert(
+          {
+            user_id: userId,
+            data: settings.data,
+            updated_at: iso(settings.updatedAt),
+            device_id: settings.deviceId,
+          },
+          { onConflict: 'user_id' },
+        )
+        .select('updated_at');
+      check(result);
+      const stored = (result.data ?? []) as { updated_at: string }[];
+      return stored[0] ? ms(stored[0].updated_at) : undefined;
+    },
+
+    async serverTime(): Promise<number> {
+      const result = await client.rpc('server_time');
+      check(result);
+      const time = ms(String(result.data));
+      if (!Number.isFinite(time)) throw new Error('the account did not say what time it is');
+      return time;
+    },
+
+    async pullProgress(): Promise<ProgressRecord[]> {
+      const result = await client
+        .from('book_progress')
+        .select('book_id, fingerprint, chapter, paragraph, char_offset, updated_at, device_id');
+      check(result);
+      return ((result.data ?? []) as ProgressRow[]).map((row) => ({
+        bookId: row.book_id,
+        fingerprint: row.fingerprint,
+        position: { chapter: row.chapter, paragraph: row.paragraph, char: row.char_offset },
+        updatedAt: ms(row.updated_at),
+        deviceId: row.device_id,
+      }));
+    },
+
+    async pullSettings(): Promise<RemoteSettings | null> {
+      const result = await client.from('user_settings').select('data, updated_at, device_id').maybeSingle();
+      check(result);
+      const row = result.data as { data: unknown; updated_at: string; device_id: string } | null;
+      return row ? { data: row.data, updatedAt: ms(row.updated_at), deviceId: row.device_id } : null;
+    },
+  };
+}

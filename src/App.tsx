@@ -1,7 +1,11 @@
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { account } from './account';
+import { AccountButton } from './auth/AccountButton';
+import type { Book } from './book/types';
 import { TypingEngine, type Stats } from './engine/engine';
 import { convertSpelling } from './engine/spelling';
 import { buildPassage, type Passage } from './engine/text';
+import { ImportDialog } from './import/ImportDialog';
 import { sample } from './sample/pride-and-prejudice';
 import {
   autoPauseMs,
@@ -78,8 +82,12 @@ export function App() {
   const [settings, setSettings] = createSignal<Settings>(loadSettings());
   const [theme, setTheme] = createSignal<Theme>(currentTheme());
 
+  // What is on the page: the bundled sample, or the first chapter of an imported book.
+  const [reading, setReading] = createSignal<typeof sample>(sample);
+  const [importing, setImporting] = createSignal(false);
+
   const passageFor = (current: Settings): Passage =>
-    buildPassage(sample.paragraphs.map((paragraph) => convertSpelling(paragraph, current.spelling)));
+    buildPassage(reading().paragraphs.map((paragraph) => convertSpelling(paragraph, current.spelling)));
 
   const [stats, setStats] = createSignal<Stats>(new TypingEngine(passageFor(settings())).stats());
 
@@ -140,6 +148,8 @@ export function App() {
 
   onMount(() => {
     start();
+    // Accounts load only now, with the typing view already on the page.
+    account.start({ readSettings: settings, applySettings });
     const timer = setInterval(publish, STATS_REFRESH_MS);
     onCleanup(() => {
       clearInterval(timer);
@@ -176,6 +186,19 @@ export function App() {
     surface?.relayout();
   };
 
+  /** Settings arriving from the reader's account: put into effect whatever differs. */
+  const applySettings = (next: Settings) => {
+    for (const name of Object.keys(next) as (keyof Settings)[]) {
+      if (next[name] === settings()[name]) continue;
+      if (name === 'spelling' && engine && engine.stats().activeMs > 0) {
+        // Changing the words restarts the chapter. Not under the reader's fingers: it waits for the next start.
+        const held = { ...settings(), spelling: next.spelling };
+        setSettings(held);
+        saveSetting('spelling', next.spelling);
+      } else change(name, next[name]);
+    }
+  };
+
   const chooseTheme = (next: Theme) => {
     document.documentElement.dataset.theme = next;
     try {
@@ -194,6 +217,19 @@ export function App() {
   const closeSettings = () => {
     dialog.close();
     giveBackKeyboard();
+  };
+  const closeImport = () => {
+    setImporting(false);
+    giveBackKeyboard();
+  };
+  /** Type the first chapter of an imported book. Choosing chapters and resuming come with the library. */
+  const openBook = (book: Book) => {
+    const first = book.chapters[0];
+    if (!first) return;
+    const chapter = first.title === book.title ? '' : first.title;
+    setReading({ title: book.title, author: book.author, chapter, paragraphs: first.paragraphs });
+    setImporting(false);
+    start();
   };
   const onDialogClick = (event: MouseEvent) => {
     // A click on the dimmed area outside the panel lands on the dialog itself.
@@ -226,6 +262,10 @@ export function App() {
           <button type="button" onClick={start}>
             Restart
           </button>
+          <button type="button" onClick={() => setImporting(true)}>
+            Import
+          </button>
+          <AccountButton onClose={() => giveBackKeyboard()} />
           <button type="button" class="icon" aria-label="Settings" title="Settings" onClick={openSettings}>
             {/* Gear outline from the Lucide icon set (ISC licence). */}
             <svg
@@ -248,10 +288,8 @@ export function App() {
 
       <main class="stage">
         <div class="book">
-          <h1>{sample.title}</h1>
-          <p>
-            {sample.author} · {sample.chapter}
-          </p>
+          <h1>{reading().title}</h1>
+          <p>{[reading().author, reading().chapter].filter(Boolean).join(' · ')}</p>
         </div>
 
         <div
@@ -545,6 +583,13 @@ export function App() {
           </section>
         </div>
       </dialog>
+
+      <ImportDialog
+        open={importing()}
+        onRequestOpen={() => setImporting(true)}
+        onClose={closeImport}
+        onBook={openBook}
+      />
     </div>
   );
 }

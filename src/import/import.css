@@ -1,0 +1,55 @@
+/* ---- import modal ---------------------------------------------------------- */
+/* The modal itself reuses the settings modal's frame (.settings, .panel, .group, .setting). */
+
+.import {
+  width: min(34rem, calc(100vw - 2rem));
+}
+
+.dropzone {
+  display: grid;
+  justify-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding: 1.75rem 1rem 1.25rem;
+  border: 1.5px dashed var(--rule);
+  border-radius: 12px;
+  background: var(--panel);
+  text-align: center;
+  transition:
+    border-color 120ms,
+    background-color 120ms;
+}
+
+.dropzone.over {
+  border-color: var(--accent);
+}
+
+.dropzone p {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.dropzone .fine {
+  font-size: 0.75rem;
+  color: var(--soft);
+}
+
+.import-error {
+  margin: 0.9rem 0 0;
+  padding: 0.6rem 0.8rem;
+  border-radius: 8px;
+  background: var(--bad-wash);
+  color: var(--bad);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.shelf {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.shelf h4 {
+  overflow-wrap: anywhere;
+}

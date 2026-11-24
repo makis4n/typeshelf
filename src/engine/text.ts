@@ -88,6 +88,11 @@ function target(glyph: string, options: TextOptions): TargetChar {
   return { glyph, accepts };
 }
 
+/** True when text has at least one word to type, which is when `buildPassage` keeps it as a paragraph. */
+export function hasWords(text: string): boolean {
+  return /\S/u.test(clean(text));
+}
+
 /** True when `typed` (one character) is an accepted key for `char`. */
 export function isAccepted(char: TargetChar, typed: string): boolean {
   return typed.length > 0 && char.accepts.includes(typed);

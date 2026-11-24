@@ -132,26 +132,57 @@ export function modeFor(stop: StopOnError): Mode {
   return stop === 'off' ? 'flow' : stop === 'word' ? 'word' : 'strict';
 }
 
-/** Read saved settings, falling back to the default for anything missing or invalid. */
-export function loadSettings(): Settings {
+/** Check a settings object from anywhere (this browser, the account): the default stands in for anything missing or invalid. */
+export function parseSettings(saved: unknown): Settings {
   const settings: Settings = { ...DEFAULT_SETTINGS };
-  try {
-    const saved: unknown = JSON.parse(localStorage.getItem(KEY) ?? '{}');
-    if (typeof saved !== 'object' || saved === null) return settings;
-    const record = { ...(saved as Record<string, unknown>) };
-    // Smooth caret used to be a plain on/off switch.
-    if (record.smoothCaret === true) record.smoothCaret = 'medium';
-    if (record.smoothCaret === false) record.smoothCaret = 'off';
-    for (const name of Object.keys(ALLOWED) as (keyof Settings)[]) {
-      const value = record[name];
-      if ((ALLOWED[name] as readonly unknown[]).includes(value)) {
-        (settings as unknown as Record<string, unknown>)[name] = value;
-      }
+  if (typeof saved !== 'object' || saved === null) return settings;
+  const record = { ...(saved as Record<string, unknown>) };
+  // Smooth caret used to be a plain on/off switch.
+  if (record.smoothCaret === true) record.smoothCaret = 'medium';
+  if (record.smoothCaret === false) record.smoothCaret = 'off';
+  for (const name of Object.keys(ALLOWED) as (keyof Settings)[]) {
+    const value = record[name];
+    if ((ALLOWED[name] as readonly unknown[]).includes(value)) {
+      (settings as unknown as Record<string, unknown>)[name] = value;
     }
-  } catch {
-    // Unreadable or blocked storage: use the defaults.
   }
   return settings;
+}
+
+/** Whether the browser refused the last attempt to save the settings. */
+let saveRefused = false;
+
+/**
+ * The saved settings, or null when there are none to read: a first visit,
+ * or a browser (a private window, say) that refuses to keep anything.
+ */
+export function storedSettings(): Settings | null {
+  // An older copy may still be readable when new ones cannot be written. It is not the reader's settings any more.
+  if (saveRefused) return null;
+  try {
+    const raw = localStorage.getItem(KEY);
+    return raw === null ? null : parseSettings(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+/** Read saved settings, falling back to the default for anything missing or invalid. */
+export function loadSettings(): Settings {
+  try {
+    return parseSettings(JSON.parse(localStorage.getItem(KEY) ?? '{}'));
+  } catch {
+    // Unreadable or blocked storage: use the defaults.
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+const savedListeners = new Set<(settings: Settings) => void>();
+
+/** Be told whenever settings are saved, so account sync can send them. Returns the way to stop. */
+export function onSettingsSaved(listener: (settings: Settings) => void): () => void {
+  savedListeners.add(listener);
+  return () => savedListeners.delete(listener);
 }
 
 /**
@@ -174,7 +205,10 @@ export function saveSetting<K extends keyof Settings>(name: K, value: Settings[K
 export function saveSettings(settings: Settings): void {
   try {
     localStorage.setItem(KEY, JSON.stringify(settings));
+    saveRefused = false;
   } catch {
+    saveRefused = true;
     // Private windows can refuse storage; the choice then lasts for this visit only.
   }
+  for (const listener of savedListeners) listener(settings);
 }

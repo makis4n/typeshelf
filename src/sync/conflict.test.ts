@@ -11,7 +11,7 @@ const at = (chapter: number, paragraph: number, char: number): Position => ({ ch
 function record(overrides: Partial<ProgressRecord> = {}): ProgressRecord {
   return {
     bookId: 'book',
-    fingerprint: 'fp',
+    fingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     position: at(1, 1, 1),
     updatedAt: 1000,
     deviceId: ME,

@@ -1,13 +1,15 @@
 /**
  * An in-memory account for tests. It follows the same rules as the real
- * database: the most recent save of a book wins, sessions are stored once,
- * counts are kept per device, and the local-only progress fields are never
- * stored. Two `Sync` instances sharing one `FakeRemote` stand in for two
+ * database: the most recent save of a book wins, a save stamped far in the
+ * future is pulled back to the account's own clock, a row that breaks a
+ * table rule is refused together with the request that carried it, sessions
+ * are stored once, counts are kept per device, and the local-only progress
+ * fields are never stored. Two `Sync` instances sharing one `FakeRemote` stand in for two
  * devices on one account.
  */
 
 import type { KeyCount, ProgressRecord, SessionRecord, WordCount } from '../store/types';
-import type { Remote, RemoteSettings } from './remote';
+import { RejectedError, type Remote, type RemoteSettings, type StoredStamp } from './remote';
 
 export interface RemoteCall {
   method: string;
@@ -17,6 +19,18 @@ export interface RemoteCall {
 
 const pair = (deviceId: string, name: string) => `${deviceId}\u0000${name}`;
 
+/** The database pulls a save time more than this far ahead of its own clock back to now. */
+const FUTURE_ALLOWANCE_MS = 5 * 60_000;
+
+const whole = (value: unknown) => typeof value === 'number' && Number.isInteger(value) && value >= 0;
+const amount = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const short = (value: unknown, max: number) => typeof value === 'string' && value.length >= 1 && value.length <= max;
+
+/** The table rules of `supabase/migrations`: a row that breaks one is refused, and the whole request with it. */
+function refuseUnless(ok: boolean, what: string): void {
+  if (!ok) throw new RejectedError(`violates check constraint: ${what}`);
+}
+
 export class FakeRemote implements Remote {
   /** While true, every call rejects. */
   offline = false;
@@ -24,12 +38,22 @@ export class FakeRemote implements Remote {
   readonly calls: RemoteCall[] = [];
   /** Runs at the start of `pushProgress`, so a test can hold a push in flight. */
   onPushProgress: (() => Promise<void> | void) | undefined;
+  /** A rule of the account's that a test makes up: a request carrying a row it returns true for is refused. */
+  refuses: ((row: unknown) => boolean) | undefined;
 
   readonly progress = new Map<string, ProgressRecord>();
   readonly sessions = new Map<string, SessionRecord>();
   private readonly keys = new Map<string, KeyCount & { deviceId: string }>();
   private readonly words = new Map<string, WordCount & { deviceId: string }>();
   settings: RemoteSettings | null = null;
+
+  /** @param now the account's own clock; a save stamped far ahead of it is pulled back to it */
+  constructor(private readonly now: () => number = Date.now) {}
+
+  private clamp(updatedAt: number): number {
+    refuseUnless(Number.isFinite(updatedAt), 'updated_at');
+    return updatedAt > this.now() + FUTURE_ALLOWANCE_MS ? this.now() : updatedAt;
+  }
 
   /** Number of calls made to one method. */
   count(method: keyof Remote): number {
@@ -77,39 +101,71 @@ export class FakeRemote implements Remote {
   private async enter(method: keyof Remote, rows: readonly unknown[]): Promise<void> {
     this.calls.push({ method, rows });
     if (this.offline) throw new Error('offline');
+    if (this.refuses && rows.some((row) => this.refuses!(row))) throw new RejectedError('violates a rule of the account');
   }
 
-  async pushProgress(rows: readonly ProgressRecord[]): Promise<void> {
+  async pushProgress(rows: readonly ProgressRecord[]): Promise<StoredStamp[]> {
     await this.enter('pushProgress', rows);
     await this.onPushProgress?.();
     if (this.offline) throw new Error('offline');
     for (const row of rows) {
-      const stored = this.progress.get(row.bookId);
-      if (stored && row.updatedAt < stored.updatedAt) continue;
-      const { ahead: _ahead, declined: _declined, ...clean } = row;
-      this.progress.set(row.bookId, { ...clean, position: { ...row.position } });
+      refuseUnless(short(row.bookId, 200), 'book_id');
+      refuseUnless(/^[0-9a-f]{64}$/.test(row.fingerprint), 'fingerprint');
+      refuseUnless(whole(row.position.chapter) && whole(row.position.paragraph) && whole(row.position.char), 'position');
+      refuseUnless(short(row.deviceId, 64), 'device_id');
     }
+    const kept: StoredStamp[] = [];
+    for (const row of rows) {
+      const updatedAt = this.clamp(row.updatedAt);
+      const stored = this.progress.get(row.bookId);
+      if (stored && updatedAt < stored.updatedAt) continue;
+      const { ahead: _ahead, declined: _declined, ...clean } = row;
+      this.progress.set(row.bookId, { ...clean, updatedAt, position: { ...row.position } });
+      kept.push({ bookId: row.bookId, updatedAt });
+    }
+    return kept;
   }
 
   async pushSessions(rows: readonly SessionRecord[]): Promise<void> {
     await this.enter('pushSessions', rows);
-    for (const row of rows) this.sessions.set(row.id, { ...row });
+    for (const row of rows) {
+      refuseUnless(short(row.bookId, 200), 'book_id');
+      refuseUnless(Number.isFinite(row.startedAt) && Number.isFinite(row.endedAt), 'started_at, ended_at');
+      refuseUnless(row.endedAt >= row.startedAt, 'ended_at >= started_at');
+      refuseUnless(whole(Math.round(row.activeMs)) && whole(Math.round(row.words)), 'active_ms, words');
+      refuseUnless(amount(row.wpm), 'wpm');
+      refuseUnless(amount(row.accuracy) && row.accuracy <= 1, 'accuracy');
+      refuseUnless(short(row.deviceId, 64), 'device_id');
+    }
+    // A session is written once: one sent again is left alone.
+    for (const row of rows) if (!this.sessions.has(row.id)) this.sessions.set(row.id, { ...row });
   }
 
   async pushKeyCounts(deviceId: string, rows: readonly KeyCount[]): Promise<void> {
     await this.enter('pushKeyCounts', rows);
+    for (const row of rows) {
+      refuseUnless(short(row.key, 8), 'key');
+      refuseUnless(whole(row.hits) && whole(row.misses) && whole(row.totalMs), 'hits, misses, total_ms');
+    }
     for (const row of rows) this.keys.set(pair(deviceId, row.key), { ...row, deviceId });
   }
 
   async pushWordCounts(deviceId: string, rows: readonly WordCount[]): Promise<void> {
     await this.enter('pushWordCounts', rows);
+    for (const row of rows) {
+      refuseUnless(short(row.word, 64), 'word');
+      refuseUnless(whole(row.hits) && whole(row.misses), 'hits, misses');
+    }
     for (const row of rows) this.words.set(pair(deviceId, row.word), { ...row, deviceId });
   }
 
-  async pushSettings(settings: RemoteSettings): Promise<void> {
+  async pushSettings(settings: RemoteSettings): Promise<number | undefined> {
     await this.enter('pushSettings', [settings]);
-    if (this.settings && settings.updatedAt < this.settings.updatedAt) return;
-    this.settings = { ...settings };
+    refuseUnless(typeof settings.data === 'object' && settings.data !== null && !Array.isArray(settings.data), 'data');
+    const updatedAt = this.clamp(settings.updatedAt);
+    if (this.settings && updatedAt < this.settings.updatedAt) return undefined;
+    this.settings = { ...settings, updatedAt };
+    return updatedAt;
   }
 
   async pullProgress(): Promise<ProgressRecord[]> {

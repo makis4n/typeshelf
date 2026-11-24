@@ -5,7 +5,7 @@ import { saveTag, type ProgressRecord } from './types';
 import { USER_DB_NAME, UserStore, type NewSession } from './userStore';
 
 const at = (chapter: number, paragraph: number, char: number): Position => ({ chapter, paragraph, char });
-const book = (id = 'book-1') => ({ id, fingerprint: `fp-${id}` });
+const book = (id = 'book-1') => ({ id, fingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' });
 
 async function openStore() {
   return UserStore.open(new IDBFactory());
@@ -29,7 +29,7 @@ function session(id = 's1', overrides: Partial<NewSession> = {}): NewSession {
 function remoteRecord(overrides: Partial<ProgressRecord> = {}): ProgressRecord {
   return {
     bookId: 'book-1',
-    fingerprint: 'fp-book-1',
+    fingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     position: at(3, 0, 0),
     updatedAt: 2000,
     deviceId: 'other-device',
@@ -44,7 +44,7 @@ describe('saveProgress', () => {
 
     expect(saved).toEqual({
       bookId: 'book-1',
-      fingerprint: 'fp-book-1',
+      fingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       position: at(1, 2, 3),
       updatedAt: 5000,
       deviceId: await store.deviceId(),
@@ -326,13 +326,22 @@ describe('addCounts', () => {
       expect(Object.keys(row).sort()).toEqual(['hits', 'misses', 'word']);
     }
 
-    // The only places typed data can sit are the two count stores.
+    // The only places typed data can sit are the two count stores (and `parked`, which holds
+    // unsent copies of those same totals for an account that has left).
     const raw = await new Promise<IDBDatabase>((resolve, reject) => {
       const opening = factory.open(USER_DB_NAME);
       opening.onsuccess = () => resolve(opening.result);
       opening.onerror = () => reject(opening.error);
     });
-    expect([...raw.objectStoreNames].sort()).toEqual(['keyStats', 'meta', 'outbox', 'progress', 'sessions', 'wordStats']);
+    expect([...raw.objectStoreNames].sort()).toEqual([
+      'keyStats',
+      'meta',
+      'outbox',
+      'parked',
+      'progress',
+      'sessions',
+      'wordStats',
+    ]);
     raw.close();
   });
 });

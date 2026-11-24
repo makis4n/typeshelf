@@ -79,9 +79,31 @@ export interface OutboxEntry {
   seq: number;
 }
 
+/**
+ * What an account had not yet managed to send when its time on this browser
+ * ended. It is kept apart from the live store, belongs to that account
+ * alone, and is sent the next time that same account signs in here.
+ */
+export interface Parked {
+  /** Given by the database when it is stored. */
+  id?: number;
+  userId: string;
+  /** The device id the rows were made under. */
+  deviceId: string;
+  progress: ProgressRecord[];
+  /** Places with an unanswered "continue from there?". Never sent: put back so the reader is still asked. */
+  held: ProgressRecord[];
+  sessions: SessionRecord[];
+  keys: KeyCount[];
+  words: WordCount[];
+  settings?: { data: unknown; updatedAt: number };
+}
+
 /** Limits shared with the database, so a row it would refuse is never queued. */
 export const MAX_KEY_LENGTH = 8;
 export const MAX_WORD_LENGTH = 64;
+export const MAX_BOOK_ID_LENGTH = 200;
+export const FINGERPRINT = /^[0-9a-f]{64}$/;
 
 /** A name for one particular save by one device, to remember that the reader said no to it. */
 export function saveTag(save: { deviceId: string; updatedAt: number }): string {

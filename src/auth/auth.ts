@@ -68,6 +68,16 @@ export interface AuthClient {
 /** The shortest password accepted. The server enforces the same number. */
 export const MIN_PASSWORD_LENGTH = 8;
 
+const LINK_FAILED = 'That link did not work. Ask for a new one.';
+
+/**
+ * Shown when a link from an email is opened in a browser other than the one
+ * that asked for it. Links only sign in the browser that requested them, so
+ * that a link made by someone else cannot sign this browser in to their account.
+ */
+export const OTHER_BROWSER =
+  'That link has to be opened in the browser where you asked for it. If you were verifying your email, it is verified now: sign in below. If you were resetting your password, ask for a new link from here.';
+
 const MESSAGES: Record<string, string> = {
   invalid_credentials: 'That email and password do not match.',
   email_not_confirmed: 'This email is not verified yet. Follow the link we sent you, then sign in.',
@@ -100,13 +110,17 @@ export function friendlyError(error: ErrorLike): string {
 /**
  * A link from an email can come back with a problem in the address
  * (expired, already used). Returns the sentence to show, or null.
+ *
+ * Only this file's own sentences are ever returned. The address also
+ * carries a free-text description, but anyone can put anything there, and
+ * showing it would let a crafted link put words in the site's mouth.
  */
 export function linkProblem(location: { hash: string; search: string }): string | null {
   for (const part of [location.hash.replace(/^#/, ''), location.search.replace(/^\?/, '')]) {
     const params = new URLSearchParams(part);
     if (!params.has('error') && !params.has('error_code')) continue;
     const code = params.get('error_code') ?? '';
-    return MESSAGES[code] ?? params.get('error_description') ?? 'That link did not work. Ask for a new one.';
+    return MESSAGES[code] ?? LINK_FAILED;
   }
   return null;
 }

@@ -8,7 +8,7 @@
  * shows no sign-in.
  */
 
-import { Auth, linkProblem, type AuthState, type Outcome, type SignUpOutcome } from './auth/auth';
+import { Auth, linkProblem, OTHER_BROWSER, type AuthState, type Outcome, type SignUpOutcome } from './auth/auth';
 import { accountConfig, type AccountConfig } from './auth/config';
 import { onSettingsSaved, parseSettings, type Settings } from './settings';
 import { UserStore } from './store/userStore';
@@ -41,9 +41,11 @@ export class Account {
   private readonly listeners = new Set<(view: AccountView) => void>();
   private started = false;
   private auth: Auth | undefined;
-  private store: UserStore | undefined;
   private syncing: Sync | undefined;
-  private syncUser: string | undefined;
+  /** The account the sync is running for; undefined for a guest, null until the first answer is in. */
+  private syncUser: string | undefined | null = null;
+  /** Changes of who owns the local store, done strictly one after the other. */
+  private handover: Promise<void> = Promise.resolve();
 
   constructor(private readonly config: AccountConfig | null) {
     this.current = { available: config !== null, auth: { status: 'loading' }, sync: null, notice: null };
@@ -88,12 +90,31 @@ export class Account {
     else setTimeout(load, 200);
   }
 
+  private inOrder(step: () => Promise<unknown>): void {
+    this.handover = this.handover
+      .then(step)
+      .then(
+        () => undefined,
+        (error: unknown) => console.warn('typeshelf: the local store could not be handed over', error),
+      );
+  }
+
   private async load(config: AccountConfig, hooks: AccountHooks): Promise<void> {
     // Read before the library loads: it clears the address once it has dealt with it.
     const notice = linkProblem(window.location);
+    const address = new URL(window.location.href);
+    // Sign-in tokens in the address are never accepted (see `flowType` below), so they are
+    // not left lying in the address bar and the history either.
+    if (/(^|[#&])(access_token|refresh_token)=/.test(address.hash)) {
+      history.replaceState(history.state, '', address.pathname + address.search);
+    }
+    const cameWithCode = address.searchParams.has('code');
+
     const [{ createClient }, store] = await Promise.all([import('@supabase/supabase-js'), UserStore.open()]);
-    this.store = store;
-    const client = createClient(config.url, config.anonKey);
+    // PKCE: a link only signs in the browser that asked for it, because that browser holds
+    // the other half of a secret. Without it, anyone could craft a link carrying their own
+    // sign-in, and a reader who opened it would be typing into the sender's account.
+    const client = createClient(config.url, config.anonKey, { auth: { flowType: 'pkce' } });
     const auth = new Auth(client.auth, window.location.origin + window.location.pathname);
     this.auth = auth;
 
@@ -106,6 +127,7 @@ export class Account {
 
     auth.subscribe((state) => {
       const userId = 'user' in state ? state.user.id : undefined;
+      const first = this.syncUser === null;
       if (userId !== this.syncUser) {
         this.syncing?.stop();
         this.syncing = undefined;
@@ -116,10 +138,24 @@ export class Account {
           sync.onState((next) => {
             if (this.syncing === sync) this.update({ sync: next });
           });
-          void sync.start();
+          // Only the takeover is waited for; the first round may take as long as the network does.
+          this.inOrder(() => sync.begin());
+        } else {
+          // Nobody is signed in, however that came about (a sign-out, an expired session, a
+          // session that ended while the page was closed). What the account had not sent is
+          // put aside for it, and the browser starts again as a clean guest's.
+          this.inOrder(() => store.endAccountSession(hooks.readSettings()));
         }
       }
       this.update({ auth: state, sync: this.syncing?.current() ?? null });
+
+      // A link opened in a different browser from the one that asked for it cannot sign in.
+      if (first && cameWithCode && state.status === 'guest') {
+        const clean = new URL(window.location.href);
+        clean.searchParams.delete('code');
+        history.replaceState(history.state, '', clean.pathname + clean.search + clean.hash);
+        this.update({ notice: OTHER_BROWSER });
+      }
     });
 
     // Leaving the tab is a natural end of a batch; coming back is a moment to catch up.
@@ -170,22 +206,19 @@ export class Account {
   /**
    * Sign out on this browser.
    *
-   * The last changes are sent first. If they all got through, this browser
-   * forgets the account's progress and counts, so the next person to use it
-   * starts as a fresh guest. If some could not be sent (offline), they are
-   * kept on this browser instead, and go up when the same account signs in
-   * again; another account signing in discards them.
+   * The last changes are sent first. Then this browser forgets the
+   * account's progress and counts, so the next person to use it starts as a
+   * fresh guest. Anything that could not be sent (offline) is not thrown
+   * away: it is put aside on this browser, out of reach of any other
+   * account, and goes up when the same account signs in here again.
    */
   async signOut(): Promise<Outcome> {
     const sync = this.syncing;
     if (sync) {
       await Promise.race([sync.flushNow(), new Promise((resolve) => setTimeout(resolve, SIGN_OUT_FLUSH_MS))]);
-      sync.stop();
     }
-    const unsent = sync && this.store ? await this.store.pendingCount() : 0;
-    const outcome = await this.ready.signOut();
-    if (sync && this.store && unsent === 0 && sync.current() === 'synced') await this.store.clear();
-    return outcome;
+    // Becoming a guest stops the sync and hands the store over (see `load`).
+    return this.ready.signOut();
   }
 }
 

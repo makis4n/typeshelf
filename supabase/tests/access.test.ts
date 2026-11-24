@@ -2,8 +2,8 @@
  * The access rules, tested against a real database: one account must never
  * read or write another's rows, and a signed-out visitor gets nothing.
  *
- * Needs the local Supabase stack (`pnpm db:start`). Without it the whole
- * file is skipped, with the reason printed, rather than passing on nothing.
+ * Needs the local Supabase stack (`pnpm db:start`). Without it the tests are
+ * skipped and the run fails with the reason, rather than passing on nothing.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -16,6 +16,12 @@ const stack = found as Stack;
 
 const FINGERPRINT = 'a'.repeat(64);
 const BOOK = 'gutenberg:1342';
+
+// Without a database nothing here can run. That is a failure, not a pass: a
+// green `pnpm test:db` must mean the access rules were really tested.
+it('has a local Supabase stack to test against', () => {
+  expect(missing, missing).toBeUndefined();
+});
 
 const TABLES = ['book_progress', 'typing_sessions', 'key_stats', 'word_stats', 'user_settings'] as const;
 type Row = Record<string, unknown>;

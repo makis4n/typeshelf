@@ -8,17 +8,22 @@
  * - Nothing is ever lost to a bad connection. A change stays queued until
  *   the account has confirmed it, and failed attempts are retried with
  *   growing gaps.
+ * - A row the account refuses for what it is (not for the connection) is
+ *   set aside, so one bad row cannot hold everything else back for ever.
  * - The first time an account meets this browser, the guest's progress is
  *   merged into it (see `pull`).
+ * - One account's unsent changes never reach another account: when a
+ *   different account takes over the browser they are moved to a side
+ *   shelf, and sent when their own account is back (`sendParked`).
  * - If another device is further on in a book, the place is not moved. It
  *   is kept as a question for the reader: `aheadFor` and `answerAhead`.
  */
 
 import type { Position } from '../book/types';
-import type { AheadPlace, OutboxEntry, OutboxKind, ProgressRecord } from '../store/types';
+import type { AheadPlace, OutboxEntry, OutboxKind, Parked } from '../store/types';
 import type { UserStore } from '../store/userStore';
 import { resolveProgress } from './conflict';
-import type { Remote } from './remote';
+import { RejectedError, type Remote } from './remote';
 
 /** How the sync reaches the settings, which live outside the local store. */
 export interface SettingsPort {
@@ -69,6 +74,9 @@ const CHUNK = 200;
 /** The order kinds are sent in: the reader's place matters most. */
 const ORDER: readonly OutboxKind[] = ['progress', 'settings', 'session', 'key', 'word'];
 
+/** The round cannot go on: the sync was stopped, or the store now belongs to someone else. Not a failure. */
+class Interrupted extends Error {}
+
 function chunks<T>(items: readonly T[]): T[][] {
   const out: T[][] = [];
   for (let at = 0; at < items.length; at += CHUNK) out.push(items.slice(at, at + CHUNK));
@@ -88,10 +96,11 @@ export class Sync {
   private readonly stateListeners = new Set<(state: SyncState) => void>();
   private readonly aheadListeners = new Set<(bookId: string) => void>();
 
+  /** Queue entries the account refused for what they are. They stay on this device but are not sent again. */
+  readonly setAside: OutboxEntry[] = [];
+
   private started = false;
   private stopped = false;
-  /** Whether this browser's contents have been merged into the account yet. */
-  private joined = false;
   private timer: unknown;
   private failures = 0;
   private running: Promise<void> | undefined;
@@ -122,14 +131,27 @@ export class Sync {
    * Resolves once the first round is over, whether or not it got through.
    */
   async start(): Promise<void> {
-    if (this.started) return;
+    await (await this.begin()).firstRound;
+  }
+
+  /**
+   * The first half of `start`: take the store over for this account, and
+   * set the first round going without waiting for it. For callers that
+   * must not be held up by a slow connection. (The round is handed back
+   * inside an object, because a promise returned bare would be waited for.)
+   */
+  async begin(): Promise<{ firstRound: Promise<void> }> {
+    if (this.started) return { firstRound: Promise.resolve() };
     this.started = true;
     const previous = await this.store.owner();
-    // Another account's leftovers must not be merged into this one.
-    if (previous !== null && previous !== this.userId) await this.store.clear();
-    this.joined = previous === this.userId;
+    // Another account's leftovers are never merged into this one. What it
+    // had not sent is put aside for it, and the store starts again empty.
+    if (previous !== null && previous !== this.userId) await this.store.endAccountSession(this.settings.read());
+    // From this moment whatever is typed here is this account's, whether or
+    // not the first round gets through.
+    await this.store.setOwner(this.userId);
     this.unsubscribe = this.store.onChange(() => this.schedule());
-    await this.refresh();
+    return { firstRound: this.refresh() };
   }
 
   /** Stop sending. Whatever is queued stays queued in the local store. */
@@ -163,7 +185,7 @@ export class Sync {
   async settingsChanged(): Promise<void> {
     // The account's copy being applied is not a change by the reader.
     if (this.applyingSettings) return;
-    await this.store.markSettingsChanged(this.now());
+    await this.store.markSettingsChanged(this.now(), this.userId);
   }
 
   // ---- another device is further on -----------------------------------------
@@ -198,19 +220,26 @@ export class Sync {
    * book is opened and when the tab comes back into view.
    */
   refresh(): Promise<void> {
-    return this.exclusive(async () => {
-      await this.pull();
-      await this.push();
-    });
+    return this.exclusive(() => this.round(true));
   }
 
   /** Send what is queued now, without waiting for the next batch. */
   flushNow(): Promise<void> {
-    return this.exclusive(async () => {
-      // Nothing may be sent before this browser has been merged into the account.
-      if (!this.joined) await this.pull();
-      await this.push();
-    });
+    return this.exclusive(() => this.round(false));
+  }
+
+  private async round(pullFirst: boolean): Promise<void> {
+    await this.mine();
+    await this.sendParked();
+    // Nothing may be sent before this browser has been merged into the account.
+    const joined = (await this.store.joinedAs()) === this.userId;
+    if (pullFirst || !joined) await this.pull(joined);
+    await this.push();
+  }
+
+  /** Go no further if the sync was stopped or the store has changed hands (another tab signed out, or in as someone else). */
+  private async mine(): Promise<void> {
+    if (this.stopped || (await this.store.owner()) !== this.userId) throw new Interrupted();
   }
 
   /** One round at a time. A call made during a round waits for it, then runs its own. */
@@ -222,9 +251,9 @@ export class Sync {
       try {
         await round();
         this.failures = 0;
-      } catch {
+      } catch (error) {
         // Offline, signed out or server trouble: everything is still queued.
-        this.failures += 1;
+        if (!(error instanceof Interrupted)) this.failures += 1;
       }
       await this.settle();
     };
@@ -241,11 +270,14 @@ export class Sync {
     if (this.stopped) return;
     // A change made during the round booked a timer with the old gap; start clean.
     this.cancelTimer();
-    const waiting = (await this.store.pendingCount()) > 0;
+    const mine = (await this.store.owner()) === this.userId;
+    // A place held back for an unanswered question is not "waiting": only the reader can release it.
+    const waiting = mine && (await this.store.sendable()).length > 0;
+    const joined = (await this.store.joinedAs()) === this.userId;
     if (this.failures > 0) {
       this.setState('failed');
       this.schedule();
-    } else if (waiting || !this.joined) {
+    } else if (waiting || (mine && !joined)) {
       this.setState('waiting');
       this.schedule();
     } else {
@@ -270,6 +302,80 @@ export class Sync {
   }
 
   /**
+   * Send what this account left unsent on an earlier visit to this browser
+   * (see `UserStore.endAccountSession`). It goes straight to the account
+   * and is never mixed into the live store, with one exception: a place
+   * with an unanswered "continue from there?" is put back, so the reader is
+   * still asked.
+   */
+  private async sendParked(): Promise<void> {
+    for (const parked of await this.store.parkedFor(this.userId)) {
+      const left: Parked = { ...parked };
+      const drop = () => {};
+      for (const record of parked.held) await this.store.restoreHeld(record, this.userId);
+      left.held = [];
+      await this.store.updateParked(left);
+
+      await this.deliver(parked.progress, (rows) => this.remote.pushProgress(rows), drop);
+      left.progress = [];
+      await this.store.updateParked(left);
+      await this.deliver(parked.sessions, (rows) => this.remote.pushSessions(rows), drop);
+      left.sessions = [];
+      await this.store.updateParked(left);
+      await this.deliver(parked.keys, (rows) => this.remote.pushKeyCounts(parked.deviceId, rows), drop);
+      left.keys = [];
+      await this.store.updateParked(left);
+      await this.deliver(parked.words, (rows) => this.remote.pushWordCounts(parked.deviceId, rows), drop);
+      left.words = [];
+      await this.store.updateParked(left);
+      if (parked.settings) {
+        const { data, updatedAt } = parked.settings;
+        await this.deliver([parked.settings], () => this.remote.pushSettings({ data, updatedAt, deviceId: parked.deviceId }), drop);
+        delete left.settings;
+        await this.store.updateParked(left);
+      }
+    }
+  }
+
+  /**
+   * Send rows in batches. If the account refuses a batch for what is in it,
+   * the rows are sent one by one, so only the row at fault is left out
+   * (`refused` is told about it) and its neighbours still get through. Any
+   * other failure (the connection, the server) is passed on, to be retried.
+   */
+  private async deliver<T>(
+    rows: readonly T[],
+    send: (rows: T[]) => Promise<unknown>,
+    refused: (row: T) => void,
+    sent: (rows: T[]) => Promise<void> = async () => {},
+  ): Promise<void> {
+    for (const batch of chunks(rows)) {
+      try {
+        await send(batch);
+        await sent(batch);
+      } catch (error) {
+        if (!(error instanceof RejectedError)) throw error;
+        if (batch.length === 1) {
+          console.warn('typeshelf: the account refused a row; it stays on this device only', error.message);
+          refused(batch[0]!);
+          await sent(batch);
+          continue;
+        }
+        for (const row of batch) {
+          try {
+            await send([row]);
+          } catch (single) {
+            if (!(single instanceof RejectedError)) throw single;
+            console.warn('typeshelf: the account refused a row; it stays on this device only', single.message);
+            refused(row);
+          }
+          await sent([row]);
+        }
+      }
+    }
+  }
+
+  /**
    * Bring the account's copy down and settle it against this device's.
    *
    * The first time an account meets this browser (`joined` is false), what
@@ -282,91 +388,133 @@ export class Sync {
    * them, so signing in on a new browser never resets them to that
    * browser's.
    */
-  private async pull(): Promise<void> {
+  private async pull(joined: boolean): Promise<void> {
     const deviceId = await this.store.deviceId();
     const [rows, remoteSettings] = await Promise.all([this.remote.pullProgress(), this.remote.pullSettings()]);
+    // The answer may have been a long time coming.
+    await this.mine();
 
     for (const remote of rows) {
-      const verdict = await this.store.reconcileProgress(remote, (local) => {
-        const decided = resolveProgress(local, remote, deviceId);
-        // The same question is not raised twice.
-        if (decided === 'ask' && sameAhead(local, remote)) return 'keep-local';
-        return decided;
-      });
+      const verdict = await this.store.reconcileProgress(
+        remote,
+        (local) => {
+          const decided = resolveProgress(local, remote, deviceId);
+          // The same question is not raised twice.
+          if (decided === 'ask' && sameAhead(local?.ahead, remote)) return 'keep-local';
+          return decided;
+        },
+        this.userId,
+      );
       if (verdict === 'ask') for (const listener of this.aheadListeners) listener(remote.bookId);
     }
 
     const localAt = await this.store.settingsChangedAt();
     if (remoteSettings === null) {
       // The account has none: this device's become the account's.
-      if (!this.joined || localAt !== undefined) await this.store.markSettingsChanged(localAt ?? this.now());
-    } else if (!this.joined || localAt === undefined || remoteSettings.updatedAt > localAt) {
+      if (!joined || localAt !== undefined) await this.store.markSettingsChanged(localAt ?? this.now(), this.userId);
+    } else if (!joined || localAt === undefined || remoteSettings.updatedAt > localAt) {
+      await this.mine();
       this.applyingSettings = true;
       try {
         this.settings.apply(remoteSettings.data);
       } finally {
         this.applyingSettings = false;
       }
-      await this.store.adoptSettings(remoteSettings.updatedAt);
+      await this.store.adoptSettings(remoteSettings.updatedAt, this.userId);
     }
 
-    if (!this.joined) {
-      await this.store.setOwner(this.userId);
-      this.joined = true;
-    }
+    await this.store.markJoined(this.userId);
   }
 
-  /** Send everything queued, one kind at a time, crossing off what the account confirms. */
+  /** Send everything that may be sent, one kind at a time, crossing off what the account confirms. */
   private async push(): Promise<void> {
-    const pending = await this.store.pending();
+    const pending = await this.store.sendable();
     if (pending.length === 0) return;
-    const deviceId = await this.store.deviceId();
     const byKind = new Map<OutboxKind, OutboxEntry[]>();
     for (const entry of pending) {
       const list = byKind.get(entry.kind) ?? [];
       list.push(entry);
       byKind.set(entry.kind, list);
     }
-
-    for (const kind of ORDER) {
-      for (const batch of chunks(byKind.get(kind) ?? [])) {
-        await this.send(kind, batch, deviceId);
-        await this.store.acknowledge(batch);
-      }
-    }
+    for (const kind of ORDER) await this.pushKind(kind, byKind.get(kind) ?? []);
   }
 
   /** Read the newest contents of what the entries name, and send them. */
-  private async send(kind: OutboxKind, entries: readonly OutboxEntry[], deviceId: string): Promise<void> {
-    // Something queued and since cleared has nothing to send; it is simply crossed off.
-    const found = async <T>(read: (ref: string) => Promise<T | undefined>): Promise<T[]> => {
-      const rows = await Promise.all(entries.map((entry) => read(entry.ref)));
-      return rows.filter((row): row is Awaited<T> & {} => row !== undefined) as T[];
+  private async pushKind(kind: OutboxKind, entries: readonly OutboxEntry[]): Promise<void> {
+    if (entries.length === 0) return;
+    const store = this.store;
+    const userId = this.userId;
+
+    /** Pair each entry with its row. Something queued and since cleared has no row: it is simply crossed off. */
+    const load = async <T>(read: (ref: string) => Promise<T | undefined>) => {
+      const pairs: { entry: OutboxEntry; row: T }[] = [];
+      const gone: OutboxEntry[] = [];
+      for (const entry of entries) {
+        const row = await read(entry.ref);
+        if (row === undefined) gone.push(entry);
+        else pairs.push({ entry, row });
+      }
+      const deviceId = await store.deviceId();
+      // Read last: if the store is still this account's now, so was everything just read from it.
+      await this.mine();
+      await store.acknowledge(gone, userId);
+      return { pairs, deviceId };
     };
+    type Pair<T> = { entry: OutboxEntry; row: T };
+    const rowsOf = <T>(pairs: Pair<T>[]) => pairs.map((pair) => pair.row);
+    const refused = <T>(pair: Pair<T>) => void this.setAside.push(pair.entry);
+    const crossOff = <T>(pairs: Pair<T>[]) => store.acknowledge(pairs.map((pair) => pair.entry), userId);
+
     switch (kind) {
       case 'progress': {
-        const rows = await found<ProgressRecord>((ref) => this.store.progress(ref));
-        if (rows.length > 0) await this.remote.pushProgress(rows);
+        const { pairs } = await load((ref) => store.progress(ref));
+        await this.deliver(
+          pairs,
+          async (batch) => {
+            const stored = await this.remote.pushProgress(rowsOf(batch));
+            // The account may have stored a save under its own time (this device's clock runs fast).
+            for (const stamp of stored) {
+              const sentAt = batch.find((pair) => pair.row.bookId === stamp.bookId)?.row.updatedAt;
+              if (sentAt !== undefined && sentAt !== stamp.updatedAt) {
+                await store.restampProgress(stamp.bookId, sentAt, stamp.updatedAt, userId);
+              }
+            }
+          },
+          refused,
+          crossOff,
+        );
         return;
       }
       case 'session': {
-        const rows = await found((ref) => this.store.session(ref));
-        if (rows.length > 0) await this.remote.pushSessions(rows);
+        const { pairs } = await load((ref) => store.session(ref));
+        await this.deliver(pairs, (batch) => this.remote.pushSessions(rowsOf(batch)), refused, crossOff);
         return;
       }
       case 'key': {
-        const rows = await found((ref) => this.store.keyCount(ref));
-        if (rows.length > 0) await this.remote.pushKeyCounts(deviceId, rows);
+        const { pairs, deviceId } = await load((ref) => store.keyCount(ref));
+        await this.deliver(pairs, (batch) => this.remote.pushKeyCounts(deviceId, rowsOf(batch)), refused, crossOff);
         return;
       }
       case 'word': {
-        const rows = await found((ref) => this.store.wordCount(ref));
-        if (rows.length > 0) await this.remote.pushWordCounts(deviceId, rows);
+        const { pairs, deviceId } = await load((ref) => store.wordCount(ref));
+        await this.deliver(pairs, (batch) => this.remote.pushWordCounts(deviceId, rowsOf(batch)), refused, crossOff);
         return;
       }
       case 'settings': {
-        const updatedAt = (await this.store.settingsChangedAt()) ?? this.now();
-        await this.remote.pushSettings({ data: this.settings.read(), updatedAt, deviceId });
+        const deviceId = await store.deviceId();
+        const updatedAt = (await store.settingsChangedAt()) ?? this.now();
+        const data = this.settings.read();
+        await this.mine();
+        const pairs = entries.map((entry) => ({ entry, row: data }));
+        await this.deliver(
+          pairs,
+          async () => {
+            const storedAt = await this.remote.pushSettings({ data, updatedAt, deviceId });
+            if (storedAt !== undefined && storedAt !== updatedAt) await store.restampSettings(updatedAt, storedAt, userId);
+          },
+          refused,
+          crossOff,
+        );
         return;
       }
     }
@@ -374,7 +522,6 @@ export class Sync {
 }
 
 /** Whether the reader already has this very save waiting as a question. */
-function sameAhead(local: ProgressRecord | undefined, remote: ProgressRecord): boolean {
-  const ahead = local?.ahead;
+function sameAhead(ahead: AheadPlace | undefined, remote: { deviceId: string; updatedAt: number }): boolean {
   return ahead !== undefined && ahead.deviceId === remote.deviceId && ahead.updatedAt === remote.updatedAt;
 }

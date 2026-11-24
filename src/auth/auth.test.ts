@@ -280,10 +280,10 @@ describe('a link that comes back with a problem', () => {
     expect(linkProblem({ hash, search: '' })).toMatch(/expired/);
   });
 
-  it("uses the server's description for a problem it does not know", () => {
-    expect(linkProblem({ hash: '', search: '?error=server_error&error_description=Database+is+down' })).toBe(
-      'Database is down',
-    );
+  it('never repeats text from the address, which anyone could have written', () => {
+    const search = '?error=server_error&error_description=Your+account+is+locked.+Call+0800+123+456';
+    expect(linkProblem({ hash: '', search })).toBe('That link did not work. Ask for a new one.');
+    expect(linkProblem({ hash: `#${search.slice(1)}`, search: '' })).toBe('That link did not work. Ask for a new one.');
   });
 });
 

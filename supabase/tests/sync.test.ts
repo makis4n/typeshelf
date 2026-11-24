@@ -10,6 +10,8 @@
 import { IDBFactory } from 'fake-indexeddb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { UserStore } from '../../src/store/userStore';
+import { createClient } from '@supabase/supabase-js';
+import { RejectedError } from '../../src/sync/remote';
 import { supabaseRemote } from '../../src/sync/supabaseRemote';
 import { Sync } from '../../src/sync/sync';
 import { admin, findStack, makeUser, removeUser, type Stack, type TestUser } from './stack';
@@ -144,6 +146,59 @@ describe.skipIf(missing)('sync against the database', () => {
     expect((await phone.store.progress(book.id))?.position.chapter).toBe(1);
   });
 
+  it('sets aside a row the database refuses, and still sends the rest', async () => {
+    const mine = await browser(user);
+    await mine.sync.start();
+    const good = crypto.randomUUID();
+    const session = { bookId: BOOK.id, startedAt: Date.now() - 1000, endedAt: Date.now(), activeMs: 900, words: 10, wpm: 40, accuracy: 0.9 };
+    // The local store cannot know every rule: this id is not one the database accepts.
+    await mine.store.addSession({ ...session, id: 'not-a-uuid' });
+    await mine.store.addSession({ ...session, id: good });
+    await mine.store.addCounts({ keys: [{ key: 'z', hits: 7 }] });
+    await mine.sync.flushNow();
+
+    expect(mine.sync.current()).toBe('synced');
+    expect(mine.sync.setAside.map((entry) => entry.ref)).toEqual(['not-a-uuid']);
+    const db = admin(stack);
+    expect((await db.from('typing_sessions').select('id').eq('user_id', user.id).eq('id', good)).data).toHaveLength(1);
+    expect((await db.from('key_totals').select('hits').eq('user_id', user.id).eq('key', 'z').single()).data).toEqual({ hits: 7 });
+  });
+
+  it('tells the adapter apart: refused rows are a RejectedError, a dead connection is not', async () => {
+    const remote = supabaseRemote(user.client, user.id);
+    const bad = { id: crypto.randomUUID(), bookId: BOOK.id, startedAt: 2000, endedAt: 1000, activeMs: 1, words: 1, wpm: 1, accuracy: 1, deviceId: 'd' };
+    await expect(remote.pushSessions([bad])).rejects.toBeInstanceOf(RejectedError);
+    await expect(remote.pushSessions([{ ...bad, endedAt: 3000, wpm: Number.NaN }])).rejects.toBeInstanceOf(RejectedError);
+    await expect(remote.pushSessions([{ ...bad, startedAt: Number.NaN }])).rejects.toBeInstanceOf(RejectedError);
+
+    const nowhere = supabaseRemote(createClient('http://127.0.0.1:9', 'key', { auth: { persistSession: false } }), user.id);
+    const failure = await nowhere.pullProgress().then(() => undefined, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(RejectedError);
+  });
+
+  it('reports the save time the database stored, which a fast clock does not get to choose', async () => {
+    const remote = supabaseRemote(user.client, user.id);
+    const place = { bookId: 'gutenberg:98', fingerprint: 'e'.repeat(64), position: { chapter: 1, paragraph: 0, char: 0 }, deviceId: 'fast-laptop' };
+    const anHourAhead = Date.now() + 3_600_000;
+    const [stored] = await remote.pushProgress([{ ...place, updatedAt: anHourAhead }]);
+    expect(stored?.bookId).toBe(place.bookId);
+    expect(Math.abs(stored!.updatedAt - Date.now())).toBeLessThan(60_000);
+    // An older save is not kept, and is not reported as kept.
+    expect(await remote.pushProgress([{ ...place, updatedAt: stored!.updatedAt - 10_000 }])).toEqual([]);
+
+    // End to end: the fast device takes the corrected time, so a later save elsewhere is seen as later.
+    const fast = await browser(user);
+    await fast.sync.start();
+    const book = { id: 'gutenberg:99', fingerprint: 'f'.repeat(64) };
+    await fast.store.saveProgress(book, { chapter: 5, paragraph: 0, char: 0 }, anHourAhead);
+    await fast.sync.flushNow();
+    expect(Math.abs((await fast.store.progress(book.id))!.updatedAt - Date.now())).toBeLessThan(60_000);
+    await remote.pushProgress([{ bookId: book.id, fingerprint: book.fingerprint, position: { chapter: 2, paragraph: 0, char: 0 }, updatedAt: Date.now() + 5000, deviceId: 'phone' }]);
+    await fast.sync.refresh();
+    expect((await fast.store.progress(book.id))?.position.chapter).toBe(2);
+  });
+
   it('keeps a different account on the same browser apart', async () => {
     const shared = new IDBFactory();
     const first = await UserStore.open(shared);
@@ -162,5 +217,19 @@ describe.skipIf(missing)('sync against the database', () => {
     const leaked = await admin(stack).from('book_progress').select('book_id').eq('user_id', other.id);
     expect(leaked.data).toEqual([]);
     expect(await first.allProgress()).toEqual([]);
+
+    // The first account's unsent place was put aside, and reaches that account when it is back.
+    sync.stop();
+    const back = new Sync({
+      store: first,
+      remote: supabaseRemote(user.client, user.id),
+      userId: user.id,
+      settings: { read: () => ({}), apply: () => {} },
+      timers: { set: () => 0, clear: () => {} },
+    });
+    await back.start();
+    const kept = await admin(stack).from('book_progress').select('chapter').eq('user_id', user.id).eq('book_id', 'gutenberg:84');
+    expect(kept.data).toEqual([{ chapter: 9 }]);
+    expect((await admin(stack).from('book_progress').select('book_id').eq('user_id', other.id)).data).toEqual([]);
   });
 });

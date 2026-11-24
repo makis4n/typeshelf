@@ -7,7 +7,7 @@ import { FakeRemote } from './fakeRemote';
 import { DEFAULT_INTERVAL_MS, Sync, type SettingsPort, type SyncState, type Timers } from './sync';
 
 const at = (chapter: number, paragraph: number, char: number): Position => ({ chapter, paragraph, char });
-const BOOK = { id: 'book-1', fingerprint: 'fp-book-1' };
+const BOOK = { id: 'book-1', fingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' };
 const USER = 'user-1';
 
 /** Timers that never run by themselves: the test looks at what was asked for and fires it by hand. */
@@ -534,6 +534,7 @@ describe('the same account restarting', () => {
     const remote = new FakeRemote();
     const device = await openDevice(remote);
     await device.store.setOwner(USER);
+    await device.store.markJoined(USER);
     await device.store.saveProgress(BOOK, at(2, 0, 0), 100);
     await device.store.addCounts({ words: [{ word: 'the', hits: 1 }] });
 
@@ -549,6 +550,7 @@ describe('the same account restarting', () => {
     remote.settings = { data: { theme: 'account' }, updatedAt: 1000, deviceId: 'other-device' };
     const device = await openDevice(remote, { settings: { theme: 'mine' } });
     await device.store.setOwner(USER);
+    await device.store.markJoined(USER);
     await device.store.markSettingsChanged(5000);
 
     await device.sync.start();
@@ -562,6 +564,7 @@ describe('the same account restarting', () => {
     remote.settings = { data: { theme: 'account' }, updatedAt: 9000, deviceId: 'other-device' };
     const device = await openDevice(remote, { settings: { theme: 'mine' } });
     await device.store.setOwner(USER);
+    await device.store.markJoined(USER);
     await device.store.markSettingsChanged(5000);
 
     await device.sync.start();
@@ -587,7 +590,7 @@ describe('offline', () => {
     expect(device.timers.delays).toHaveLength(1);
   });
 
-  it('sends nothing and keeps no owner while the first pull has never succeeded', async () => {
+  it('sends nothing while the first pull has never succeeded, but the browser is already the account’s', async () => {
     const remote = new FakeRemote();
     remote.offline = true;
     const device = await openDevice(remote);
@@ -595,7 +598,9 @@ describe('offline', () => {
 
     await device.sync.start();
 
-    expect(await device.store.owner()).toBeNull();
+    // Whatever is typed from now on is this account's, so it can never be merged into another one.
+    expect(await device.store.owner()).toBe(USER);
+    expect(await device.store.joinedAs()).toBeNull();
     for (const method of ['pushProgress', 'pushSessions', 'pushKeyCounts', 'pushWordCounts', 'pushSettings'] as const) {
       expect(remote.count(method)).toBe(0);
     }
@@ -689,7 +694,7 @@ describe('batching', () => {
 
     await device.store.saveProgress(BOOK, at(0, 0, 1), 100);
     await device.store.saveProgress(BOOK, at(0, 0, 2), 101);
-    await device.store.saveProgress({ id: 'book-2', fingerprint: 'fp-2' }, at(0, 0, 1), 102);
+    await device.store.saveProgress({ id: 'book-2', fingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }, at(0, 0, 1), 102);
 
     expect(DEFAULT_INTERVAL_MS).toBe(12_000);
     expect(device.timers.delays).toEqual([12_000]);
@@ -711,7 +716,7 @@ describe('batching', () => {
     await device.sync.start();
     const pushesBefore = remote.count('pushProgress');
     for (let i = 1; i <= 5; i += 1) await device.store.saveProgress(BOOK, at(0, 0, i), 100 + i);
-    await device.store.saveProgress({ id: 'book-2', fingerprint: 'fp-2' }, at(0, 0, 1), 200);
+    await device.store.saveProgress({ id: 'book-2', fingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }, at(0, 0, 1), 200);
 
     device.timers.fire();
     await vi.waitFor(async () => expect(await device.store.pendingCount()).toBe(0));
@@ -790,6 +795,7 @@ describe('batching', () => {
     const remote = new FakeRemote();
     remote.offline = true;
     const device = await openDevice(remote);
+    await device.store.setOwner(USER);
     await device.store.saveProgress(BOOK, at(0, 0, 1), 100);
 
     await device.sync.flushNow();

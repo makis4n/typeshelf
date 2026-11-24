@@ -10,7 +10,7 @@
 
 import { expect, test, type Page } from '@playwright/test';
 import { ACCOUNT_PORT } from '../playwright.config';
-import { admin, type Stack } from '../supabase/tests/stack';
+import { admin, visitor, type Stack } from '../supabase/tests/stack';
 
 const stack: Stack | undefined = process.env.TYPESHELF_E2E_STACK
   ? (JSON.parse(process.env.TYPESHELF_E2E_STACK) as Stack)
@@ -150,7 +150,7 @@ test.describe('with accounts switched on', () => {
     await page.screenshot({ path: testInfo.outputPath('account.png') });
 
     // The link's token is gone from the address bar.
-    expect(page.url()).not.toContain('access_token');
+    expect(page.url()).not.toContain('code=');
 
     await mine.getByRole('button', { name: 'Sign out' }).click();
     await expect(page.getByRole('dialog')).toBeHidden();
@@ -159,6 +159,61 @@ test.describe('with accounts switched on', () => {
     await page.reload();
     await typingReady(page);
     await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+  });
+
+  test('an emailed link opened in a different browser signs nobody in, and says what to do', async ({ page, browser }) => {
+    const email = newEmail('elsewhere');
+    const password = newPassword();
+    await page.goto(SITE);
+    await typingReady(page);
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await page.getByRole('button', { name: 'Create an account' }).click();
+    const create = page.getByRole('dialog', { name: 'Create an account' });
+    await create.getByLabel('Email').fill(email);
+    await create.getByLabel(/Password/).fill(password);
+    await create.getByRole('button', { name: 'Create account' }).click();
+    await expect(page.getByRole('dialog', { name: 'Check your inbox' })).toBeVisible();
+
+    // The link is opened on another device.
+    const other = await (await browser.newContext()).newPage();
+    await other.goto(await emailedLink(email));
+    const dialog = other.getByRole('dialog', { name: 'Sign in' });
+    await expect(dialog.getByRole('alert')).toContainText('browser where you asked for it');
+    await expect(other.getByRole('button', { name: 'Account', exact: true })).toHaveCount(0);
+    expect(other.url()).not.toContain('code=');
+
+    // The email is verified all the same, so signing in with the password works there.
+    await dialog.getByLabel('Email').fill(email);
+    await dialog.getByLabel('Password').fill(password);
+    await dialog.getByRole('button', { name: 'Sign in' }).click();
+    await expect(other.getByRole('button', { name: 'Account', exact: true })).toBeVisible();
+  });
+
+  test('a setting arriving from another device does not restart a chapter being typed', async ({ page }) => {
+    const user = await verifiedAccount('spelling');
+    await page.goto(SITE);
+    await typingReady(page);
+    await signIn(page, user.email, user.password);
+    await expect(page.getByRole('button', { name: 'Account', exact: true })).toBeVisible();
+    await page.keyboard.type('It is a truth ');
+    // "It is a truth": ten letters typed correctly.
+    await expect(page.locator('.c.ok')).toHaveCount(10);
+
+    // Another device changes the spelling and the caret; this tab catches up when it comes back into view.
+    const { error } = await admin(stack!)
+      .from('user_settings')
+      .upsert({ user_id: user.id, data: { spelling: 'american', caretStyle: 'block' }, updated_at: new Date(Date.now() + 2000).toISOString(), device_id: 'phone' });
+    expect(error).toBeNull();
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+
+    // The caret changes at once; the typed text stays where it was.
+    await expect(page.locator('.surface')).toHaveAttribute('data-caret', 'block');
+    await expect(page.locator('.c.ok')).toHaveCount(10);
+    // The new spelling is chosen in settings and takes effect at the next start.
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await expect(
+      page.getByRole('dialog', { name: 'Settings' }).getByRole('group', { name: 'Spelling' }).getByRole('button', { name: 'American' }),
+    ).toHaveAttribute('aria-pressed', 'true');
   });
 
   test('a wrong password is refused with a plain sentence', async ({ page }) => {
@@ -204,6 +259,46 @@ test.describe('with accounts switched on', () => {
     await page.getByRole('dialog', { name: 'Sign in' }).getByLabel('Password').fill(replacement);
     await page.getByRole('dialog', { name: 'Sign in' }).getByRole('button', { name: 'Sign in' }).click();
     await expect(page.getByRole('button', { name: 'Account', exact: true })).toBeVisible();
+  });
+
+  test('a link carrying someone else’s sign-in does not sign this browser in as them', async ({ page }) => {
+    // The attacker signs in to their own account elsewhere and builds a link from their own tokens.
+    const attacker = await verifiedAccount('attacker');
+    const elsewhere = visitor(stack!);
+    const { data, error } = await elsewhere.auth.signInWithPassword({ email: attacker.email, password: attacker.password });
+    if (error || !data.session) throw error ?? new Error('no session');
+    const crafted =
+      `${SITE}#access_token=${data.session.access_token}&refresh_token=${data.session.refresh_token}` +
+      `&expires_in=3600&expires_at=${data.session.expires_at}&token_type=bearer&type=magiclink`;
+
+    // The victim, a guest who has changed a setting, opens it.
+    await page.goto(SITE);
+    await typingReady(page);
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page
+      .getByRole('dialog', { name: 'Settings' })
+      .getByRole('group', { name: 'Caret style' })
+      .getByRole('button', { name: 'Box' })
+      .click();
+    await page.getByRole('button', { name: 'Close settings' }).click();
+    await page.goto(crafted);
+    await page.reload();
+    await typingReady(page);
+
+    // Still a guest, the tokens are gone from the address, and nothing of theirs went to the attacker's account.
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Account', exact: true })).toHaveCount(0);
+    expect(page.url()).not.toContain('access_token');
+    await page.waitForTimeout(1500);
+    const leaked = await admin(stack!).from('user_settings').select('data').eq('user_id', attacker.id);
+    expect(leaked.data).toEqual([]);
+  });
+
+  test('a link problem never shows text taken from the address', async ({ page }) => {
+    await page.goto(`${SITE}#error=server_error&error_description=Your+account+is+locked.+Call+0800+123+456`);
+    const alert = page.getByRole('dialog', { name: 'Sign in' }).getByRole('alert');
+    await expect(alert).toBeVisible();
+    await expect(alert).not.toContainText('0800');
   });
 
   test('an expired link is explained instead of failing silently', async ({ page }) => {

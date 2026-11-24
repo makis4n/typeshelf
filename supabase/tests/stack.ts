@@ -20,7 +20,8 @@ export interface Stack {
 export function findStack(): Stack | { missing: string } {
   let raw: string;
   try {
-    raw = execFileSync('pnpm', ['dlx', 'supabase', 'status', '-o', 'env'], {
+    // The CLI is a pinned dev dependency: nothing is fetched from the network to run it.
+    raw = execFileSync('pnpm', ['exec', 'supabase', 'status', '-o', 'env'], {
       encoding: 'utf8',
       timeout: 60_000,
       stdio: ['ignore', 'pipe', 'pipe'],

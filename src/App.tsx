@@ -179,7 +179,13 @@ export function App() {
   /** Settings arriving from the reader's account: put into effect whatever differs. */
   const applySettings = (next: Settings) => {
     for (const name of Object.keys(next) as (keyof Settings)[]) {
-      if (next[name] !== settings()[name]) change(name, next[name]);
+      if (next[name] === settings()[name]) continue;
+      if (name === 'spelling' && engine && engine.stats().activeMs > 0) {
+        // Changing the words restarts the chapter. Not under the reader's fingers: it waits for the next start.
+        const held = { ...settings(), spelling: next.spelling };
+        setSettings(held);
+        saveSettings(held);
+      } else change(name, next[name]);
     }
   };
 

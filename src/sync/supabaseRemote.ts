@@ -9,14 +9,23 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { KeyCount, ProgressRecord, SessionRecord, WordCount } from '../store/types';
-import type { Remote, RemoteSettings } from './remote';
+import { RejectedError, type Remote, type RemoteSettings, type StoredStamp } from './remote';
 
-const iso = (ms: number) => new Date(ms).toISOString();
+/** A time as the database wants it. A time that is not a time is the row's fault, not the connection's. */
+const iso = (ms: number) => {
+  if (!Number.isFinite(ms)) throw new RejectedError('a row carries a time that is not a time');
+  return new Date(ms).toISOString();
+};
 const ms = (isoTime: string) => new Date(isoTime).getTime();
 
 /** Supabase reports failure in the result instead of throwing; the sync expects a rejection. */
-function check(result: { error: { message: string } | null }): void {
-  if (result.error) throw new Error(result.error.message);
+function check(result: { error: { message: string; code?: string } | null }): void {
+  const error = result.error;
+  if (!error) return;
+  // Postgres classes 22 (a value it cannot store) and 23 (a broken table rule):
+  // the rows are at fault, and sending them again cannot work.
+  if (/^(22|23)/.test(error.code ?? '')) throw new RejectedError(error.message);
+  throw new Error(error.message);
 }
 
 interface ProgressRow {
@@ -31,9 +40,10 @@ interface ProgressRow {
 
 export function supabaseRemote(client: SupabaseClient, userId: string): Remote {
   return {
-    async pushProgress(rows: readonly ProgressRecord[]) {
-      check(
-        await client.from('book_progress').upsert(
+    async pushProgress(rows: readonly ProgressRecord[]): Promise<StoredStamp[]> {
+      const result = await client
+        .from('book_progress')
+        .upsert(
           rows.map((row) => ({
             user_id: userId,
             book_id: row.bookId,
@@ -45,8 +55,14 @@ export function supabaseRemote(client: SupabaseClient, userId: string): Remote {
             device_id: row.deviceId,
           })),
           { onConflict: 'user_id,book_id' },
-        ),
-      );
+        )
+        // Rows the account kept, with the save time it stored them under.
+        .select('book_id, updated_at');
+      check(result);
+      return ((result.data ?? []) as { book_id: string; updated_at: string }[]).map((row) => ({
+        bookId: row.book_id,
+        updatedAt: ms(row.updated_at),
+      }));
     },
 
     async pushSessions(rows: readonly SessionRecord[]) {
@@ -105,9 +121,10 @@ export function supabaseRemote(client: SupabaseClient, userId: string): Remote {
       );
     },
 
-    async pushSettings(settings: RemoteSettings) {
-      check(
-        await client.from('user_settings').upsert(
+    async pushSettings(settings: RemoteSettings): Promise<number | undefined> {
+      const result = await client
+        .from('user_settings')
+        .upsert(
           {
             user_id: userId,
             data: settings.data,
@@ -115,8 +132,11 @@ export function supabaseRemote(client: SupabaseClient, userId: string): Remote {
             device_id: settings.deviceId,
           },
           { onConflict: 'user_id' },
-        ),
-      );
+        )
+        .select('updated_at');
+      check(result);
+      const stored = (result.data ?? []) as { updated_at: string }[];
+      return stored[0] ? ms(stored[0].updated_at) : undefined;
     },
 
     async pullProgress(): Promise<ProgressRecord[]> {

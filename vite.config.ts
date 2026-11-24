@@ -6,6 +6,6 @@ export default defineConfig({
   test: {
     // The engine is plain TypeScript with no DOM, so unit tests run in Node.
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'worker/**/*.test.ts'],
   },
 });
